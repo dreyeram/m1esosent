@@ -195,22 +195,14 @@ sudo reboot
 
 ---
 
-## Troubleshooting
+### VNC showing "Cannot currently show the desktop"?
+- Raspberry Pi 5 uses **Wayland** by default, which is incompatible with some VNC clients. 
+- **The Fix**: Switch to **X11**:
+  1. Run: `sudo raspi-config`
+  2. Go to **6 Advanced Options** → **A6 Wayland** → **W1 X11**
+  3. Finish and **Reboot**.
 
-### Still seeing Raspberry Pi logo at boot?
-- Double-check `cmdline.txt` has `logo.nologo` and is ONE LINE.
-- Verify `config.txt` has `disable_splash=1`.
-
-### Desktop still visible before app?
-- Increase the `sleep 5` in `kiosk.sh` to `sleep 10`.
-- Verify the autostart file is in `~/.config/autostart/`.
-
-### Mouse cursor still visible?
-- Run: `pkill unclutter && unclutter -idle 0 -root &`
-
-### PM2 / App not starting?
-```bash
-pm2 delete all
-pm2 start npm --name "loyalmed" -- start
-pm2 save
-```
+### Screen still black?
+- If you are testing over VNC, you might need to set a default resolution:
+  1. `sudo raspi-config`
+  2. **Display Options** → **Resolution** → Set to **1920x1080**.

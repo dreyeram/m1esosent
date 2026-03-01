@@ -121,24 +121,49 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, []);
 
         // ═══════════════════════════════════════
-        //  DEV MODE WEBRTC FALLBACK (For Local Testing Only)
+        //  CAMERA INITIALIZATION — Pi Daemon First, WebRTC Fallback
         // ═══════════════════════════════════════
         const videoRef = useRef<HTMLVideoElement>(null);
+        const [mjpegMode, setMjpegMode] = useState(false);
+        const mjpegImgRef = useRef<HTMLImageElement>(null);
+        const mjpegRafRef = useRef<number | null>(null);
 
         useEffect(() => {
             if (typeof window === 'undefined') return;
 
-            // Only run WebRTC fallback on localhost (dev testing environment)
-            if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-                setStatus("fallback");
-                return;
-            }
-
             let stream: MediaStream | null = null;
             let isActive = true;
 
-            async function setupDevCamera() {
+            async function initCamera() {
+                const hostname = window.location.hostname || 'localhost';
+
+                // Step 1: Try the Pi capture daemon on port 5555
                 try {
+                    const statusRes = await fetch(`http://${hostname}:5555/status`, {
+                        signal: AbortSignal.timeout(2000)
+                    });
+                    if (statusRes.ok) {
+                        const data = await statusRes.json();
+                        if (data.status === 'streaming' || data.status === 'waiting') {
+                            console.log("[Camera] Pi capture daemon detected — using MJPEG polling mode");
+                            if (isActive) {
+                                setMjpegMode(true);
+                                setStatus("connected");
+                            }
+                            return; // Daemon is available, use MJPEG mode
+                        }
+                    }
+                } catch {
+                    console.log("[Camera] Pi daemon not available, trying WebRTC fallback...");
+                }
+
+                // Step 2: Fall back to WebRTC (dev laptop with webcam)
+                try {
+                    if (!navigator.mediaDevices?.getUserMedia) {
+                        console.log("[Camera] getUserMedia not available");
+                        if (isActive) setStatus("fallback");
+                        return;
+                    }
                     const constraints = {
                         video: {
                             deviceId: deviceId ? { exact: deviceId } : undefined,
@@ -153,12 +178,12 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         setStatus("streaming");
                     }
                 } catch (err) {
-                    console.error("Local Dev WebRTC failed:", err);
+                    console.error("WebRTC camera failed:", err);
                     if (isActive) setStatus("fallback");
                 }
             }
 
-            setupDevCamera();
+            initCamera();
 
             return () => {
                 isActive = false;
@@ -167,6 +192,51 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 }
             };
         }, [deviceId, resolution]);
+
+        // ═══════════════════════════════════════
+        //  MJPEG Polling Loop — Fetches frames from Pi daemon at ~30fps
+        // ═══════════════════════════════════════
+        useEffect(() => {
+            if (!mjpegMode) return;
+
+            let isActive = true;
+            const hostname = window.location.hostname || 'localhost';
+
+            async function pollFrame() {
+                if (!isActive) return;
+                try {
+                    const res = await fetch(`http://${hostname}:5555/capture`, { cache: 'no-store' });
+                    if (res.ok && isActive) {
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        if (mjpegImgRef.current && isActive) {
+                            const oldSrc = mjpegImgRef.current.src;
+                            mjpegImgRef.current.src = url;
+                            if (oldSrc && oldSrc.startsWith('blob:')) {
+                                URL.revokeObjectURL(oldSrc);
+                            }
+                            setStatus("connected");
+                        } else {
+                            URL.revokeObjectURL(url);
+                        }
+                    }
+                } catch {
+                    // Connection lost, will retry
+                }
+                if (isActive) {
+                    mjpegRafRef.current = window.setTimeout(pollFrame, 33) as unknown as number; // ~30fps
+                }
+            }
+
+            pollFrame();
+
+            return () => {
+                isActive = false;
+                if (mjpegRafRef.current !== null) {
+                    clearTimeout(mjpegRafRef.current as unknown as number);
+                }
+            };
+        }, [mjpegMode]);
 
         // ═══════════════════════════════════════
         //  ARROW KEY CONTROLS — Sub-pixel calibration Accuracy
@@ -1074,6 +1144,19 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         height: "100%",
                         background: "transparent",
                     }}>
+                        {/* MJPEG Mode — Pi capture daemon feed */}
+                        {mjpegMode && (
+                            <img
+                                ref={mjpegImgRef}
+                                alt="Camera Feed"
+                                className="pointer-events-none"
+                                style={{
+                                    ...videoInnerStyle,
+                                    display: 'block',
+                                    objectFit: 'contain',
+                                }}
+                            />
+                        )}
                         {/* Dev Mode local camera fallback (Only plays if stream attached) */}
                         <video
                             ref={videoRef}
