@@ -1,0 +1,60 @@
+{
+  "users": [
+    {
+      "id": "9988f85c-85c7-4547-9345-fea654c86429",
+      "username": "demo@clinic.com",
+      "fullName": "Demo Admin",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    },
+    {
+      "id": "1bbb776a-312f-4deb-9997-3f0824a94532",
+      "username": "doctor@clinic.com",
+      "fullName": "Dr. Sarah",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    },
+    {
+      "id": "33293414-1625-4c2b-bdf0-9cf34c271caf",
+      "username": "assist@clinic.com",
+      "fullName": "Nurse Joy",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    },
+    {
+      "id": "c2ed08a9-280c-4143-916e-1fa888711e7b",
+      "username": "testuser",
+      "fullName": "Dr. Test",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    },
+    {
+      "id": "73b4faf3-6119-48e1-926c-4c80fb83caf0",
+      "username": "debug1",
+      "fullName": "Debug User",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    },
+    {
+      "id": "8f5e137e-2889-4768-a22a-944b68e3563e",
+      "username": "testuser2",
+      "fullName": "Test User",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    },
+    {
+      "id": "10a42b00-3a30-4371-9ee6-73da8716f45a",
+      "username": "newtest",
+      "fullName": "Dr. New Test",
+      "profilePicturePath": null,
+      "orgName": "Prediscan Hospital",
+      "orgLogoPath": "uploads/logos/logos_d18685af-6231-4268-b340-5cd657939abb_1771495930023.jpg"
+    }
+  ]
+}

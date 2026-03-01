@@ -1,0 +1,150 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #1d1d1f;
+
+  /* Aurora Colors - Soft, Medical tones */
+  --aurora-1: rgba(186, 230, 253, 0.4);
+  /* Sky */
+  --aurora-2: rgba(221, 214, 254, 0.3);
+  /* Violet */
+  --aurora-3: rgba(255, 255, 255, 0.6);
+  /* Pure Light */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: 'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', sans-serif;
+
+  --radius-squircle-lg: 1.25rem;
+  --radius-squircle-xl: 1.75rem;
+
+  /* Fluid Motion */
+  --ease-cinematic: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Aurora Mesh Background Engine - STATIC OPTIMIZED */
+.aurora-bg {
+  background: var(--background);
+  position: relative;
+  overflow: hidden;
+  z-index: 0;
+}
+
+.aurora-bg::before,
+.aurora-bg::after,
+.aurora-particle {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(60px);
+  /* Reduced blur */
+  z-index: -1;
+  /* Animation removed for performance */
+}
+
+.aurora-bg::before {
+  width: 60vw;
+  height: 60vw;
+  top: -10%;
+  left: -10%;
+  background: var(--aurora-1);
+}
+
+.aurora-bg::after {
+  width: 50vw;
+  height: 50vw;
+  bottom: -10%;
+  right: -10%;
+  background: var(--aurora-2);
+}
+
+.aurora-particle {
+  width: 40vw;
+  height: 40vw;
+  top: 30%;
+  left: 30%;
+  background: var(--aurora-3);
+  opacity: 0.5;
+}
+
+/* Living Glass Classes - PERFORMANCE TUNED */
+.glass-surface {
+  @apply bg-white/60 backdrop-blur-md;
+  /* Reduced from 2xl */
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.05),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+}
+
+.glass-floating {
+  @apply bg-white/70 backdrop-blur-md rounded-3xl shadow-xl;
+  /* Reduced from 2xl */
+  box-shadow:
+    0 10px 15px -3px rgba(0, 0, 0, 0.05),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+.glass-header {
+  @apply bg-white/50 backdrop-blur-md;
+  /* Reduced from xl */
+  box-shadow: inset 0 -1px 0 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Spotlight Pill */
+.spotlight-pill {
+  @apply h-12 bg-white/70 backdrop-blur-md rounded-full px-6 flex items-center gap-3;
+  transition: all 200ms ease-out;
+  /* Faster transition */
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.02),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+.spotlight-pill:focus-within {
+  @apply bg-white ring-2 ring-blue-500/10;
+  transform: scale(1.01);
+}
+
+/* Cinematic Transitions - DISABLED/REDUCED */
+.view-enter {
+  /* animation removed */
+}
+
+/* Utilities */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.squircle-lg {
+  border-radius: var(--radius-squircle-lg);
+}
+
+.squircle-xl {
+  border-radius: var(--radius-squircle-xl);
+}
+
+body {
+  @apply text-foreground min-h-screen selection:bg-blue-100 selection:text-blue-900;
+  font-family: var(--font-sans);
+}
+
+/* Background Receding Logic - DISABLED */
+.receding-content {
+  /* transition: transform 0.8s var(--ease-cinematic), filter 0.8s var(--ease-cinematic), opacity 0.8s var(--ease-cinematic); */
+}
+
+.is-active-sheet .receding-content {
+  /* No visual change for background on sheet open to save performance */
+  /* transform: scale(0.96) translateY(5px); */
+  /* filter: blur(8px) brightness(0.9); */
+  /* opacity: 0.8; */
+  /* pointer-events: none; */
+}

@@ -1,0 +1,62 @@
+[2026-02-06T17:51:48.851Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-06T17:51:54.856Z] [WhatsAppService] Initialization failed: "Navigating frame was detached"
+[2026-02-06T17:52:01.839Z] [WhatsAppService] Cleaning up... 
+[2026-02-06T17:52:01.845Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-06T17:52:04.647Z] [WhatsAppService] Initialization failed: "Navigating frame was detached"
+[2026-02-06T17:56:57.600Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-06T17:57:21.269Z] [WhatsAppService] QR Code received 
+[2026-02-06T17:57:21.297Z] [WhatsAppService] Client initialized successfully 
+[2026-02-06T17:58:02.144Z] [WhatsAppService] Authenticated 
+[2026-02-06T17:58:02.149Z] [WhatsAppService] Authenticated 
+[2026-02-06T17:58:02.154Z] [WhatsAppService] Authenticated 
+[2026-02-06T18:00:13.375Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-06T18:00:20.939Z] [WhatsAppService] Client initialized successfully 
+[2026-02-06T18:00:23.217Z] [WhatsAppService] Authenticated 
+[2026-02-06T18:00:25.136Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:00:25.146Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:00:25.268Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:01:08.872Z] [WhatsAppService] Send request: {"phone":"6710","hasMedia":false}
+[2026-02-06T18:01:09.564Z] [WhatsAppService] Send attempt 1 failed: "Cannot read properties of undefined (reading 'markedUnread')\nI (https://static.whatsapp.net/rsrc.php/v4iNN34/yq/l/en_US-j/X0NlYrL-1zk.js:1580:4178)"
+[2026-02-06T18:01:09.566Z] [WhatsAppService] Retrying in 1000ms... 
+[2026-02-06T18:01:11.211Z] [WhatsAppService] Send attempt 2 failed: "Cannot read properties of undefined (reading 'markedUnread')\nI (https://static.whatsapp.net/rsrc.php/v4iNN34/yq/l/en_US-j/X0NlYrL-1zk.js:1580:4178)\nObject.<anonymous> (https://static.whatsapp.net/rsrc.php/v4iNN34/yq/l/en_US-j/X0NlYrL-1zk.js:1580:1751)"
+[2026-02-06T18:01:11.213Z] [WhatsAppService] Retrying in 2000ms... 
+[2026-02-06T18:01:13.679Z] [WhatsAppService] Send attempt 3 failed: "Cannot read properties of undefined (reading 'markedUnread')\nI (https://static.whatsapp.net/rsrc.php/v4iNN34/yq/l/en_US-j/X0NlYrL-1zk.js:1580:4178)\nObject.<anonymous> (https://static.whatsapp.net/rsrc.php/v4iNN34/yq/l/en_US-j/X0NlYrL-1zk.js:1580:1751)"
+[2026-02-06T18:03:52.301Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-06T18:04:00.407Z] [WhatsAppService] Client initialized successfully 
+[2026-02-06T18:04:02.952Z] [WhatsAppService] Authenticated 
+[2026-02-06T18:04:04.669Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:04:04.676Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:05:06.356Z] [WhatsAppService] Send request: {"phone":"6710","hasMedia":false}
+[2026-02-06T18:05:07.100Z] [WhatsAppService] Send attempt 1 failed: "Cannot read properties of undefined (reading 'markedUnread')\nI (https://static.whatsapp.net/rsrc.php/v4iNN34/yz/l/en_US-j/qR9-REQwCCh.js:1580:4178)\nObject.<anonymous> (https://static.whatsapp.net/rsrc.php/v4iNN34/yz/l/en_US-j/qR9-REQwCCh.js:1580:1751)"
+[2026-02-06T18:05:07.102Z] [WhatsAppService] Retrying in 1000ms... 
+[2026-02-06T18:05:08.472Z] [WhatsAppService] Send attempt 2 failed: "Cannot read properties of undefined (reading 'markedUnread')\nI (https://static.whatsapp.net/rsrc.php/v4iNN34/yz/l/en_US-j/qR9-REQwCCh.js:1580:4178)\nObject.<anonymous> (https://static.whatsapp.net/rsrc.php/v4iNN34/yz/l/en_US-j/qR9-REQwCCh.js:1580:1751)"
+[2026-02-06T18:05:08.474Z] [WhatsAppService] Retrying in 2000ms... 
+[2026-02-06T18:05:10.860Z] [WhatsAppService] Send attempt 3 failed: "Cannot read properties of undefined (reading 'markedUnread')\nI (https://static.whatsapp.net/rsrc.php/v4iNN34/yz/l/en_US-j/qR9-REQwCCh.js:1580:4178)\nObject.<anonymous> (https://static.whatsapp.net/rsrc.php/v4iNN34/yz/l/en_US-j/qR9-REQwCCh.js:1580:1751)"
+[2026-02-06T18:08:13.163Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-06T18:08:24.240Z] [WhatsAppService] QR Code received 
+[2026-02-06T18:08:24.266Z] [WhatsAppService] Client initialized successfully 
+[2026-02-06T18:09:17.633Z] [WhatsAppService] Authenticated 
+[2026-02-06T18:09:17.638Z] [WhatsAppService] Authenticated 
+[2026-02-06T18:09:17.643Z] [WhatsAppService] Authenticated 
+[2026-02-06T18:09:19.194Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.199Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.203Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.208Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.211Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.216Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.363Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.366Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:19.370Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-06T18:09:21.296Z] [WhatsAppService] Client READY! 
+[2026-02-06T18:09:39.172Z] [WhatsAppService] Send request: {"phone":"6710","hasMedia":false}
+[2026-02-07T07:10:33.965Z] [WhatsAppService] Initializing WhatsApp client... 
+[2026-02-07T07:10:42.983Z] [WhatsAppService] Client initialized successfully 
+[2026-02-07T07:10:45.088Z] [WhatsAppService] Authenticated 
+[2026-02-07T07:10:46.882Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-07T07:10:46.891Z] [WhatsAppService] Watchdog detected internal readiness, forcing READY status 
+[2026-02-07T07:10:47.567Z] [WhatsAppService] Client READY! 
+[2026-02-07T07:11:04.319Z] [WhatsAppService] Send request: {"phone":"6710","hasMedia":false}
+[2026-02-07T08:52:19.857Z] [WhatsAppService] Health check failed: {"name":"TargetCloseError","cause":{"name":"ProtocolError"}}
+[2026-02-07T08:52:20.525Z] [WhatsAppService] Attempting reconnect in 2000ms (attempt 1/5) 
+[2026-02-07T08:52:22.529Z] [WhatsAppService] Cleaning up... 
+[2026-02-07T08:52:22.532Z] [WhatsAppService] Already ready 

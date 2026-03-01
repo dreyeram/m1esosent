@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: endoscopy_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adminpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-endoscopy_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U admin -d endoscopy_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - endoscopy_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: endoscopy_app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      # Connect to the postgres service. 
+      # Note: For local dev outside docker using ports, use localhost:5432
+      # Inside docker, use postgres:5432
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-adminpassword}@postgres:5432/${POSTGRES_DB:-endoscopy_db}?schema=public
+    volumes:
+      - ./prisma:/app/prisma
+      # Mount public for uploads if needed, or use a separate volume
+      - ./public:/app/public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+    networks:
+      - endoscopy_net
+
+volumes:
+  postgres_data:
+
+
+networks:
+  endoscopy_net:
+    driver: bridge

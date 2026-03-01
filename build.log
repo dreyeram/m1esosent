@@ -1,0 +1,39 @@
+
+> endoscopy-suite@0.1.0 build
+> next build --webpack
+
+▲ Next.js 16.1.0 (webpack)
+- Environments: .env
+- Experiments (use with caution):
+  · serverActions
+
+  Creating an optimized production build ...
+⚠ Compiled with warnings in 11.9s
+
+./node_modules/fluent-ffmpeg/lib/options/misc.js
+Critical dependency: the request of a dependency is an expression
+
+Import trace for requested module:
+./node_modules/fluent-ffmpeg/lib/options/misc.js
+./node_modules/fluent-ffmpeg/lib/fluent-ffmpeg.js
+./node_modules/fluent-ffmpeg/index.js
+./node_modules/whatsapp-web.js/src/util/Util.js
+./node_modules/whatsapp-web.js/src/Client.js
+./node_modules/whatsapp-web.js/index.js
+./lib/communication/whatsapp-service.ts
+./app/api/communication/route.ts
+
+  Running TypeScript ...
+Failed to compile.
+
+./components/panels/SettingsPanel.tsx:15:10
+Type error: Module '"@/app/actions/export"' has no exported member 'exportPatientsCSV'.
+
+[0m [90m 13 |[39m [36mimport[39m { useSettings[33m,[39m [33mProcedureToolSettings[39m[33m,[39m defaultProcedureTools } [36mfrom[39m [32m"@/contexts/SettingsContext"[39m[33m;[39m
+ [90m 14 |[39m [36mimport[39m { updateUserProfile[33m,[39m updateOrganizationSettings } [36mfrom[39m [32m"@/app/actions/settings"[39m[33m;[39m
+[31m[1m>[22m[39m[90m 15 |[39m [36mimport[39m { exportPatientsCSV[33m,[39m exportSettingsBackup[33m,[39m getExportStatistics } [36mfrom[39m [32m"@/app/actions/export"[39m[33m;[39m
+ [90m    |[39m          [31m[1m^[22m[39m
+ [90m 16 |[39m
+ [90m 17 |[39m [90m// Settings Section Types[39m
+ [90m 18 |[39m type [33mSettingsSection[39m [33m=[39m [32m'profile'[39m [33m|[39m [32m'organization'[39m [33m|[39m [32m'communication'[39m [33m|[39m [32m'procedure-tools'[39m [33m|[39m [32m'scope-settings'[39m [33m|[39m [32m'appearance'[39m [33m|[39m [32m'shortcuts'[39m [33m|[39m [32m'data'[39m[33m;[39m[0m
+Next.js build worker exited with code: 1 and signal: null

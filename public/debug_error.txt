@@ -1,0 +1,37 @@
+Error: PrismaClientKnownRequestError: 
+Invalid `prisma.user.findUnique()` invocation:
+
+
+The column `main.User.dangerZonePin` does not exist in the current database.
+Stack: PrismaClientKnownRequestError: 
+Invalid `prisma.user.findUnique()` invocation:
+
+
+The column `main.User.dangerZonePin` does not exist in the current database.
+    at _n.handleRequestError (E:\mln\endoscopy-suite\node_modules\@prisma\client\runtime\library.js:121:7749)
+    at _n.handleAndLogRequestError (E:\mln\endoscopy-suite\node_modules\@prisma\client\runtime\library.js:121:7057)
+    at _n.request (E:\mln\endoscopy-suite\node_modules\@prisma\client\runtime\library.js:121:6741)
+    at async l (E:\mln\endoscopy-suite\node_modules\@prisma\client\runtime\library.js:130:9355)
+    at async loginUser (webpack-internal:///(action-browser)/./app/actions/auth.ts:110:22)
+    at async executeActionAndPrepareForRender (E:\mln\endoscopy-suite\node_modules\next\dist\compiled\next-server\app-page.runtime.dev.js:36:3803)
+    at async E:\mln\endoscopy-suite\node_modules\next\dist\compiled\next-server\app-page.runtime.dev.js:36:1109
+    at async handleAction (E:\mln\endoscopy-suite\node_modules\next\dist\compiled\next-server\app-page.runtime.dev.js:34:23598)
+    at async renderToHTMLOrFlightImpl (E:\mln\endoscopy-suite\node_modules\next\dist\compiled\next-server\app-page.runtime.dev.js:41:42106)
+    at async doRender (webpack-internal:///(rsc)/./node_modules/next/dist/build/webpack/loaders/next-app-loader/index.js?name=app%2Flogin%2Fpage&page=%2Flogin%2Fpage&appPaths=%2Flogin%2Fpage&pagePath=private-next-app-dir%2Flogin%2Fpage.tsx&appDir=E%3A%5Cmln%5Cendoscopy-suite%5Capp&pageExtensions=tsx&pageExtensions=ts&pageExtensions=jsx&pageExtensions=js&rootDir=E%3A%5Cmln%5Cendoscopy-suite&isDev=true&tsconfigPath=&basePath=&assetPrefix=&nextConfigOutput=&preferredRegion=&middlewareConfig=e30%3D&isGlobalNotFoundEnabled=!:466:28)
+    at async AppPageRouteModule.handleResponse (E:\mln\endoscopy-suite\node_modules\next\dist\compiled\next-server\app-page.runtime.dev.js:43:64166)
+    at async handleResponse (webpack-internal:///(rsc)/./node_modules/next/dist/build/webpack/loaders/next-app-loader/index.js?name=app%2Flogin%2Fpage&page=%2Flogin%2Fpage&appPaths=%2Flogin%2Fpage&pagePath=private-next-app-dir%2Flogin%2Fpage.tsx&appDir=E%3A%5Cmln%5Cendoscopy-suite%5Capp&pageExtensions=tsx&pageExtensions=ts&pageExtensions=jsx&pageExtensions=js&rootDir=E%3A%5Cmln%5Cendoscopy-suite&isDev=true&tsconfigPath=&basePath=&assetPrefix=&nextConfigOutput=&preferredRegion=&middlewareConfig=e30%3D&isGlobalNotFoundEnabled=!:680:32)
+    at async Module.handler (webpack-internal:///(rsc)/./node_modules/next/dist/build/webpack/loaders/next-app-loader/index.js?name=app%2Flogin%2Fpage&page=%2Flogin%2Fpage&appPaths=%2Flogin%2Fpage&pagePath=private-next-app-dir%2Flogin%2Fpage.tsx&appDir=E%3A%5Cmln%5Cendoscopy-suite%5Capp&pageExtensions=tsx&pageExtensions=ts&pageExtensions=jsx&pageExtensions=js&rootDir=E%3A%5Cmln%5Cendoscopy-suite&isDev=true&tsconfigPath=&basePath=&assetPrefix=&nextConfigOutput=&preferredRegion=&middlewareConfig=e30%3D&isGlobalNotFoundEnabled=!:1049:20)
+    at async DevServer.renderToResponseWithComponentsImpl (E:\mln\endoscopy-suite\node_modules\next\dist\server\base-server.js:1422:9)
+    at async DevServer.renderPageComponent (E:\mln\endoscopy-suite\node_modules\next\dist\server\base-server.js:1474:24)
+    at async DevServer.renderToResponseImpl (E:\mln\endoscopy-suite\node_modules\next\dist\server\base-server.js:1524:32)
+    at async DevServer.pipeImpl (E:\mln\endoscopy-suite\node_modules\next\dist\server\base-server.js:1018:25)
+    at async NextNodeServer.handleCatchallRenderRequest (E:\mln\endoscopy-suite\node_modules\next\dist\server\next-server.js:395:17)
+    at async DevServer.handleRequestImpl (E:\mln\endoscopy-suite\node_modules\next\dist\server\base-server.js:909:17)
+    at async E:\mln\endoscopy-suite\node_modules\next\dist\server\dev\next-dev-server.js:387:20
+    at async Span.traceAsyncFn (E:\mln\endoscopy-suite\node_modules\next\dist\trace\trace.js:157:20)
+    at async DevServer.handleRequest (E:\mln\endoscopy-suite\node_modules\next\dist\server\dev\next-dev-server.js:383:24)
+    at async invokeRender (E:\mln\endoscopy-suite\node_modules\next\dist\server\lib\router-server.js:248:21)
+    at async handleRequest (E:\mln\endoscopy-suite\node_modules\next\dist\server\lib\router-server.js:447:24)
+    at async requestHandlerImpl (E:\mln\endoscopy-suite\node_modules\next\dist\server\lib\router-server.js:496:13)
+    at async Server.requestListener (E:\mln\endoscopy-suite\node_modules\next\dist\server\lib\start-server.js:226:13)
+Time: 2026-01-22T14:14:14.417Z

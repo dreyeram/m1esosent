@@ -1,0 +1,310 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+
+
+// Enums
+// Enums removed for SQLite compatibility
+
+
+// Models
+model Organization {
+  id                String   @id @default(uuid())
+  name              String
+  type              String  @default("CLINIC")
+  logoPath          String?  // Path to logo file
+  address           String?  // Physical address
+  mobile            String?  // Contact mobile
+  contactEmail      String?  // Contact email
+  letterheadConfig  String?  // JSON string for storing position/style of letterhead
+  smtpConfig        String?  // JSON string for SMTP settings (host, port, user, pass, etc)
+  uhidConfig        String?  // JSON: { prefix: "MRN-", suffix: "", currentSerial: 1000, digits: 6 }
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  users             User[]
+  scheduleSettings  ScheduleSettings?
+  medicines         Medicine[]
+  equipment         Equipment[]
+  tags              Tag[]
+}
+
+model User {
+  id              String   @id @default(uuid())
+  username        String   @unique
+  passwordHash    String
+  fullName        String
+  degree          String?  // e.g. MD, MBBS, DGO
+  role            String   @default("DOCTOR")
+  contactDetails  String?  // JSON for phone/email
+  signaturePath   String?  // Path to signature image
+  profilePicturePath String? // Path to profile picture
+  dangerZonePin   String?  // PIN for accessing Danger Zone
+  
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  
+  proceduresAsDoctor    Procedure[] @relation("DoctorProcedures")
+  proceduresAsAssistant Procedure[] @relation("AssistantProcedures")
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime? // Soft delete support
+}
+
+model Patient {
+  id            String   @id @default(uuid())
+  mrn           String   @unique // Medical Record Number
+  fullName      String
+  dateOfBirth   DateTime?
+  age           Int?
+  gender        String?
+  mobile        String?  // stored as properly indexed column
+  email         String?  // stored as properly indexed column
+  address       String?  // added address as well for completeness
+  referringDoctor String? // Referring Physician
+  refId         String?  // Referral ID (OH)
+  contactInfo   String?  // JSON string (keeping for legacy/extra data)
+  deletedAt     DateTime?  // Soft delete timestamp (null = active)
+  
+  procedures    Procedure[]
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([fullName])
+  @@index([mobile])
+  @@index([deletedAt])
+  @@index([updatedAt])
+}
+
+model Procedure {
+  id          String        @id @default(uuid())
+  type        String
+  status      String        @default("SCHEDULED") // SCHEDULED, CHECKED_IN, IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW
+  
+  // Scheduling fields
+  scheduledDate   DateTime?         // Date of scheduled procedure
+  scheduledTime   String?           // Time in "HH:mm" format (e.g., "09:30")
+  durationMinutes Int       @default(30)  // Expected procedure duration
+  
+  // Actual procedure times
+  startTime   DateTime?
+  endTime     DateTime?
+  
+  // Check-in tracking
+  checkedInAt DateTime?
+  
+  // Cancellation/reschedule tracking
+  cancelledAt     DateTime?
+  cancelReason    String?           // Reason for cancellation
+  rescheduledToId String?           // ID of new procedure if rescheduled
+  rescheduledFromId String?         // ID of original procedure if this is a reschedule
+  
+  // Notes
+  schedulingNotes String?
+  
+  patientId   String
+  patient     Patient       @relation(fields: [patientId], references: [id])
+  
+  doctorId    String
+  doctor      User          @relation("DoctorProcedures", fields: [doctorId], references: [id])
+  
+  assistantId String?
+  assistant   User?         @relation("AssistantProcedures", fields: [assistantId], references: [id])
+  
+  media       Media[]
+  report      Report?
+  shareTokens ShareToken[]
+  
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([status])
+  @@index([scheduledDate])
+  @@index([createdAt])
+}
+
+model Media {
+  id            String    @id @default(uuid())
+  type          String
+  filePath      String
+  thumbnailPath String?
+  originId      String?   // [ADDED] Track original image for annotated versions
+  timestamp     DateTime  @default(now())
+  
+  procedureId   String
+  procedure     Procedure @relation(fields: [procedureId], references: [id])
+
+  @@index([procedureId])
+  @@index([timestamp])
+}
+
+model Report {
+  id          String    @id @default(uuid())
+  content     String    // JSON content of the report findings
+  pdfPath     String?   // Path to generated PDF file
+  finalized   Boolean   @default(false)
+  finalizedAt DateTime?
+  
+  procedureId String    @unique
+  procedure   Procedure @relation(fields: [procedureId], references: [id])
+  
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// Schedule Settings - configurable by organization
+model ScheduleSettings {
+  id                    String   @id @default(uuid())
+  
+  // Working hours
+  dayStartTime          String   @default("08:00")    // e.g., "08:00"
+  dayEndTime            String   @default("18:00")    // e.g., "18:00"
+  
+  // Lunch break
+  lunchBreakEnabled     Boolean  @default(true)
+  lunchStartTime        String   @default("12:00")
+  lunchEndTime          String   @default("13:00")
+  
+  // Time slot configuration
+  slotDurationMinutes   Int      @default(15)         // 15 or 30 minute slots
+  
+  // Default procedure durations (JSON: {"egd": 30, "colonoscopy": 45, ...})
+  procedureDurations    String   @default("{\"egd\":30,\"colonoscopy\":45,\"ercp\":60,\"sigmoidoscopy\":30,\"nasal_endoscopy\":15,\"laryngoscopy\":20,\"otoendoscopy\":20,\"bronchoscopy\":30}")
+  
+  // Workflow options
+  enableCheckIn         Boolean  @default(true)       // Show CHECKED_IN status step
+  showCancelledSlots    Boolean  @default(true)       // Show cancelled procedures on calendar
+  
+  // Working days (JSON array: [1,2,3,4,5] = Mon-Fri)
+  workingDays           String   @default("[1,2,3,4,5,6]")  // Mon-Sat by default
+  
+  // Organization relation
+  organizationId        String   @unique
+  organization          Organization @relation(fields: [organizationId], references: [id])
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  timestamp    DateTime @default(now())
+  eventType    String
+  userId       String?
+  username     String?
+  role         String?
+  resourceType String?
+  resourceId   String?
+  action       String
+  details      String?  // JSON string
+  ipAddress    String?
+  userAgent    String?
+  success      Boolean
+  errorMessage String?
+
+  @@index([timestamp])
+  @@index([userId])
+  @@index([eventType])
+}
+
+// Secure Share Token for report sharing
+model ShareToken {
+  id          String    @id @default(uuid())
+  procedureId String
+  procedure   Procedure @relation(fields: [procedureId], references: [id])
+  
+  expiresAt   DateTime
+  accessedAt  DateTime?
+  viewCount   Int       @default(0)
+  
+  isActive    Boolean   @default(true)
+  recipient   String?   // Phone or email for audit
+  channel     String?   // "whatsapp" or "email"
+  
+  createdAt   DateTime  @default(now())
+  
+  @@index([procedureId])
+  @@index([expiresAt])
+}
+
+// Customizable message templates
+model MessageTemplate {
+  id        String   @id @default(uuid())
+  name      String   // e.g. "Report Share - WhatsApp"
+  channel   String   // "whatsapp" or "email"
+  subject   String?  // For email only
+  body      String   // Template with {{link}}, {{patientName}}, {{doctorName}}
+  isDefault Boolean  @default(false)
+  
+  organizationId String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+// Medicine Inventory
+model Medicine {
+  id              String   @id @default(uuid())
+  name            String   // Medicine name (e.g. Paracetamol)
+  composition     String?  // Salt/Composition
+  strength        String?  // e.g. 500mg
+  category        String?  // e.g. Tablet, Syrup, Injection
+  dosageForm      String?  // e.g. Oral, IV
+  description     String?
+  
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([name])
+}
+
+// Equipment Inventory
+model Equipment {
+  id             String   @id @default(uuid())
+  name           String
+  type           String   // e.g., "Scope", "Processor"
+  serialNumber   String?
+  modelNumber    String?
+  isDefault      Boolean  @default(false)
+  procedureTypes String?  // JSON array of associated procedure types e.g. ["gastroscopy", "colonoscopy"]
+  
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+}
+
+// Annotation Tags
+model Tag {
+  id             String       @id @default(uuid())
+  label          String
+  color          String       @default("#ef4444")
+  category       String?      // Optional grouping
+  
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, label]) // Prevent duplicates within an org
+  @@index([organizationId])
+}
