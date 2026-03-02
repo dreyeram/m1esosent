@@ -139,24 +139,37 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 const hostname = window.location.hostname || 'localhost';
 
                 // Step 1: Try the Pi capture daemon on port 5555
-                try {
-                    const statusRes = await fetch(`http://${hostname}:5555/status`, {
-                        signal: AbortSignal.timeout(2000)
-                    });
-                    if (statusRes.ok) {
-                        const data = await statusRes.json();
-                        if (data.status === 'streaming' || data.status === 'waiting') {
-                            console.log("[Camera] Pi capture daemon detected — using MJPEG polling mode");
-                            if (isActive) {
-                                setMjpegMode(true);
-                                setStatus("connected");
+                // RETRY LOOP: The daemon may not be ready when the page loads
+                // (GStreamer, daemon, and browser all race on boot).
+                // Keep trying every 2s for up to 60s before falling back to WebRTC.
+                const MAX_DAEMON_RETRIES = 30;
+                for (let attempt = 1; attempt <= MAX_DAEMON_RETRIES; attempt++) {
+                    if (!isActive) return;
+                    try {
+                        const statusRes = await fetch(`http://${hostname}:5555/status`, {
+                            signal: AbortSignal.timeout(2000)
+                        });
+                        if (statusRes.ok) {
+                            const data = await statusRes.json();
+                            if (data.status === 'streaming' || data.status === 'waiting') {
+                                console.log(`[Camera] Pi capture daemon detected (attempt ${attempt}) — using MJPEG polling mode`);
+                                if (isActive) {
+                                    setMjpegMode(true);
+                                    setStatus("connected");
+                                }
+                                return; // Daemon is available, use MJPEG mode
                             }
-                            return; // Daemon is available, use MJPEG mode
                         }
+                    } catch {
+                        console.log(`[Camera] Pi daemon not available (attempt ${attempt}/${MAX_DAEMON_RETRIES}), retrying in 2s...`);
                     }
-                } catch {
-                    console.log("[Camera] Pi daemon not available, trying WebRTC fallback...");
+                    // Wait 2s before retrying (unless this is the last attempt)
+                    if (attempt < MAX_DAEMON_RETRIES && isActive) {
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
                 }
+
+                console.log("[Camera] Pi daemon not available after 60s, trying WebRTC fallback...");
 
                 // Step 2: Fall back to WebRTC (dev laptop with webcam)
                 try {
