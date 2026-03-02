@@ -76,6 +76,12 @@ connectToGStreamer();
 // HTTP API Server (port 5555) for Next.js UI
 // ---------------------------------------------------------
 const server = http.createServer((req, res) => {
+    // Parse the URL to get pathname without query string
+    // CRITICAL: Browser sends /capture?t=123 for cache-busting,
+    // req.url includes the query string, so we must parse it
+    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const pathname = parsedUrl.pathname;
+
     // Enable CORS for the local Next.js frontend
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -86,7 +92,7 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    if (req.url === '/capture' && req.method === 'GET') {
+    if (pathname === '/capture' && req.method === 'GET') {
         if (latestFrame) {
             // Instantly serve the JPEG buffer out of RAM (Zero Latency)
             res.writeHead(200, {
@@ -98,10 +104,10 @@ const server = http.createServer((req, res) => {
             res.writeHead(503, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'No frame available yet. Is GStreamer running?' }));
         }
-    } else if (req.url === '/status') {
+    } else if (pathname === '/status') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: latestFrame ? 'streaming' : 'waiting' }));
-    } else if (req.url.startsWith('/record/start')) {
+    } else if (pathname.startsWith('/record/start')) {
         if (activeRecordingProcess) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Already recording' }));
@@ -143,7 +149,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'recording_started', filePath: `/data/media/${filename}` }));
 
-    } else if (req.url.startsWith('/record/stop')) {
+    } else if (pathname.startsWith('/record/stop')) {
         if (!activeRecordingProcess) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Not recording' }));
@@ -165,9 +171,9 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'success', filename: savedUrl }));
 
-    } else if (req.url.startsWith('/ptz')) {
+    } else if (pathname.startsWith('/ptz')) {
         // e.g. /ptz?pan=100&tilt=-50&zoom=200
-        const urlParams = new URLSearchParams(req.url.split('?')[1] || "");
+        const urlParams = parsedUrl.searchParams;
         let commands = [];
 
         if (urlParams.has('zoom')) commands.push(`zoom_absolute=${urlParams.get('zoom')}`);
