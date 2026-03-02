@@ -19,11 +19,9 @@ HEIGHT="${HEIGHT:-1080}"
 FRAMERATE="${FRAMERATE:-30}"
 
 # Display rectangle for kmssink:
-# The app UI uses the full screen. The live feed occupies the LEFT 70% of 1920.
 # Left 70% of 1920 = 1344px wide.
-# To keep 16:9 inside 1344px width: height = 1344 * 9 / 16 = 756px
-# Vertical centering in 1080px display: (1080 - 756) / 2 = 162px from top
-# Format: x,y,width,height
+# 16:9 inside 1344px: height = 1344 * 9 / 16 = 756px
+# Vertical centering in 1080px: (1080 - 756) / 2 = 162px from top
 DISP_X=0
 DISP_Y=162
 DISP_W=1344
@@ -48,14 +46,11 @@ wait_for_device() {
     log "Device $VIDEO_DEVICE is ready."
 }
 
-# ─── Detect actual supported MJPEG resolution ───────────────────────────────
+# ─── Log device capabilities for debugging ──────────────────────────────────
 detect_caps() {
-    # Try to confirm the device supports MJPEG at requested resolution.
-    # If v4l2-ctl is not available or doesn't show it, we still try — GStreamer
-    # will fallback to whatever the card advertises.
     if command -v v4l2-ctl &>/dev/null; then
-        log "Device capabilities:"
-        v4l2-ctl -d "$VIDEO_DEVICE" --list-formats-ext 2>/dev/null | head -40 >&2 || true
+        log "Device capabilities (MJPEG formats):"
+        v4l2-ctl -d "$VIDEO_DEVICE" --list-formats-ext 2>/dev/null | grep -A5 "MJPG\|JPEG" >&2 || true
     fi
 }
 
@@ -65,7 +60,7 @@ wait_for_drm() {
     while ! ls /dev/dri/card* &>/dev/null; do
         retries=$((retries + 1))
         if [ $retries -gt 30 ]; then
-            log "WARNING: No DRM device after 30s. kmssink may fail — will try anyway."
+            log "WARNING: No DRM device after 30s."
             return 1
         fi
         sleep 1
@@ -85,7 +80,7 @@ prepare_console() {
 # ─── Cleanup on exit ────────────────────────────────────────────────────────
 GST_PID=""
 cleanup() {
-    log "Shutting down live feed..."
+    log "Shutting down..."
     [ -n "$GST_PID" ] && kill "$GST_PID" 2>/dev/null || true
     [ -n "$GST_PID" ] && wait "$GST_PID" 2>/dev/null || true
     setterm --cursor on 2>/dev/null || true
@@ -93,55 +88,33 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ─── Build GStreamer pipeline ─────────────────────────────────────────────────
-# PIPELINE DESIGN:
-#
-#  v4l2src → MJPEG caps (exactly 1920×1080 @ requested FPS)
+# ─── Launch pipeline ─────────────────────────────────────────────────────────
+# PIPELINE:
+#  v4l2src → MJPEG caps 1920x1080@30fps
 #      └→ tee
 #           ├─ BRANCH A (Display): jpegdec → videoconvert → videoscale →
-#           │   video/x-raw,width=1344,height=756 → kmssink (DRM overlay)
-#           │   sync=false async=false = zero clock-matching = zero latency
-#           │   render-rectangle locks it to exact pixels, no distortion
+#           │   exact 1344x756 → kmssink (DRM overlay, 16:9 in left 70%)
+#           │   sync=false async=false = zero latency
+#           │   leaky queue = always latest frame, never frozen
 #           │
-#           └─ BRANCH B (Capture): raw MJPEG bytes → tcpserversink :5000
-#               pi_capture_daemon.js reads this to serve /capture endpoint
+#           └─ BRANCH B (Capture): raw MJPEG → tcpserversink :5000
+#               pi_capture_daemon.js reads this for /capture endpoint
 #
-# KEY FIXES:
-#  - Explicit caps "image/jpeg,width=1920,height=1080,framerate=30/1"
-#    forces the HDMI card to 1920×1080 — no ambiguity, no negotiation drift
-#  - videoscale on display branch ensures exact 1344×756, preserving 16:9
-#  - leaky=downstream on queues = never block on display, never freeze
-#  - max-size-buffers=1 on display = always show the LATEST frame, not old ones
-#
-build_pipeline() {
+launch_pipeline() {
     local caps="image/jpeg,width=${WIDTH},height=${HEIGHT},framerate=${FRAMERATE}/1"
 
-    # Display branch: decode JPEG → scale to exact display rect → DRM plane
-    local display_branch="queue name=qdisp leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! jpegdec ! videoconvert ! videoscale ! video/x-raw,width=${DISP_W},height=${DISP_H} ! kmssink name=sink render-rectangle=\"${DISP_RECT}\" sync=false async=false can-scale=false"
+    local display_branch="queue name=qdisp leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! jpegdec ! videoconvert ! videoscale method=linear ! video/x-raw,width=${DISP_W},height=${DISP_H},pixel-aspect-ratio=1/1 ! kmssink name=sink render-rectangle=\"${DISP_RECT}\" sync=false async=false"
 
-    # Capture branch: raw MJPEG bytes → TCP server for Node daemon
     local capture_branch="queue name=qcap leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! tcpserversink host=127.0.0.1 port=5000 sync=false async=false"
 
-    echo "v4l2src device=${VIDEO_DEVICE} io-mode=mmap do-timestamp=true ! ${caps} ! tee name=t t. ! ${display_branch} t. ! ${capture_branch}"
-}
+    local pipeline="v4l2src device=${VIDEO_DEVICE} io-mode=mmap do-timestamp=true ! ${caps} ! tee name=t t. ! ${display_branch} t. ! ${capture_branch}"
 
-# ─── Launch with kmssink, fallback to no-display if DRM unavailable ──────────
-launch_pipeline() {
-    local pipeline
-    pipeline=$(build_pipeline)
+    log "Pipeline: $pipeline"
+    log "Display rect: x=${DISP_X} y=${DISP_Y} w=${DISP_W} h=${DISP_H}"
 
-    log "Pipeline:"
-    log "  $pipeline"
-    log ""
-    log "Display rect: x=${DISP_X} y=${DISP_Y} w=${DISP_W} h=${DISP_H} (16:9 inside 1344px left panel)"
-    log "Capture TCP:  127.0.0.1:5000 → pi_capture_daemon.js → port 5555"
-
-    if command -v chrt &>/dev/null; then
-        # Real-time priority to minimise kernel scheduling jitter
-        chrt -f 50 gst-launch-1.0 -e $pipeline &
-    else
-        gst-launch-1.0 -e $pipeline &
-    fi
+    # Run GStreamer WITHOUT chrt (requires root not available for lm user)
+    # Use GST_DEBUG=1 to get errors but not spam
+    GST_DEBUG=1 gst-launch-1.0 -e $pipeline &
     GST_PID=$!
     log "GStreamer running (PID: ${GST_PID}). Waiting..."
     wait "$GST_PID"
@@ -165,7 +138,6 @@ main() {
     wait_for_drm || true
     prepare_console
 
-    # Retry loop — if GStreamer crashes (e.g. camera unplugged briefly), restart it
     local attempt=0
     while true; do
         attempt=$((attempt + 1))
@@ -174,12 +146,11 @@ main() {
         if launch_pipeline; then
             log "Pipeline exited cleanly."
         else
-            local code=$?
-            log "Pipeline exited with code ${code}. Retrying in 3s..."
+            log "Pipeline exited with code $?. Retrying in 3s..."
         fi
 
         sleep 3
-        wait_for_device  # Re-check device before restart
+        wait_for_device
     done
 }
 
