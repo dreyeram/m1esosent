@@ -255,7 +255,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 try {
                     const res = await fetch(`${captureUrl}?t=${Date.now()}`, {
                         cache: 'no-store',
-                        signal: AbortSignal.timeout(1500), // Tight timeout — 1.5s max per frame
+                        signal: AbortSignal.timeout(1500),
                     });
 
                     if (!res.ok || !isActive) {
@@ -266,46 +266,51 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
 
                     const blob = await res.blob();
                     if (!isActive || blob.size < 100) {
-                        // Too small = likely empty/error frame
                         if (isActive) setTimeout(loadNextFrame, 50);
                         return;
                     }
 
                     const newUrl = URL.createObjectURL(blob);
 
-                    // Wait for img to render this frame, with a safety timeout
-                    const loaded = await Promise.race([
-                        new Promise<boolean>((resolve) => {
-                            if (!mjpegImgRef.current || !isActive) {
-                                URL.revokeObjectURL(newUrl);
-                                resolve(false);
-                                return;
-                            }
-                            const img = mjpegImgRef.current;
-                            const cleanup = () => {
-                                img.removeEventListener('load', onLoad);
-                                img.removeEventListener('error', onError);
-                            };
-                            const onLoad = () => { cleanup(); resolve(true); };
-                            const onError = () => { cleanup(); resolve(false); };
-                            img.addEventListener('load', onLoad, { once: true });
-                            img.addEventListener('error', onError, { once: true });
-                            img.src = newUrl;
-                        }),
-                        // Safety: if img never fires load/error, don't hang forever
-                        new Promise<boolean>(r => setTimeout(() => r(false), 500)),
-                    ]);
+                    // DOUBLE BUFFER: Decode the frame off-screen first,
+                    // then swap it into the visible img synced with display refresh.
+                    // This eliminates screen tearing / "glassy lines" on motion.
+                    const offscreen = new Image();
+                    offscreen.src = newUrl;
 
-                    if (loaded) {
-                        if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
-                        prevBlobUrl = newUrl;
-                        consecutiveErrors = 0;
-                        if (isActive) {
-                            setStatus("connected");
-                            setMjpegHasFrame(true);
-                        }
-                    } else {
+                    try {
+                        // decode() returns a promise that resolves when the image
+                        // is fully decoded and ready to render without jank
+                        await offscreen.decode();
+                    } catch {
+                        // decode failed (corrupt frame) — skip it
                         URL.revokeObjectURL(newUrl);
+                        if (isActive) setTimeout(loadNextFrame, 16);
+                        return;
+                    }
+
+                    if (!isActive || !mjpegImgRef.current) {
+                        URL.revokeObjectURL(newUrl);
+                        return;
+                    }
+
+                    // Swap the decoded frame into the visible img at the next
+                    // display refresh — prevents mid-refresh tearing
+                    await new Promise<void>((resolve) => {
+                        requestAnimationFrame(() => {
+                            if (isActive && mjpegImgRef.current) {
+                                mjpegImgRef.current.src = newUrl;
+                            }
+                            resolve();
+                        });
+                    });
+
+                    if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+                    prevBlobUrl = newUrl;
+                    consecutiveErrors = 0;
+                    if (isActive) {
+                        setStatus("connected");
+                        setMjpegHasFrame(true);
                     }
 
                 } catch {
@@ -315,10 +320,10 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                     }
                 }
 
-                // Request next frame immediately (no rAF cap = lower latency)
+                // Request next frame — use rAF to cap at display refresh rate
+                // and prevent frame buildup
                 if (isActive) {
-                    // Micro-delay to allow event loop to breathe
-                    setTimeout(loadNextFrame, 0);
+                    requestAnimationFrame(() => loadNextFrame());
                 }
             }
 
