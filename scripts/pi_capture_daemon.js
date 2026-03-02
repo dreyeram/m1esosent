@@ -8,26 +8,51 @@ let latestFrame = null;
 let currentBuffer = Buffer.alloc(0);
 
 // Connect to GStreamer TCP Server (tcpserversink port 5000)
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB safety cap
+
 function connectToGStreamer() {
     console.log('Attempting to connect to GStreamer on port 5000...');
     const client = new net.Socket();
 
     client.connect(5000, '127.0.0.1', () => {
         console.log('Connected to GStreamer zero-latency tcp branch!');
+        currentBuffer = Buffer.alloc(0); // Reset buffer on reconnect
     });
 
     client.on('data', (data) => {
         currentBuffer = Buffer.concat([currentBuffer, data]);
 
-        // Find JPEG Start (FF D8) and End (FF D9)
-        const startIdx = currentBuffer.indexOf(Buffer.from([0xFF, 0xD8]));
-        const endIdx = currentBuffer.indexOf(Buffer.from([0xFF, 0xD9]));
+        // Safety: cap buffer to prevent memory leak if frames aren't being extracted
+        if (currentBuffer.length > MAX_BUFFER_SIZE) {
+            // Keep only the last 2MB to preserve any partial frame
+            currentBuffer = currentBuffer.subarray(currentBuffer.length - 2 * 1024 * 1024);
+        }
 
-        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-            // We have a full frame! Keep ONLY the latest frame in RAM
-            latestFrame = currentBuffer.subarray(startIdx, endIdx + 2);
-            // Drop everything before the end of this frame
+        // Extract all complete JPEG frames, keep only the latest
+        while (true) {
+            const startIdx = currentBuffer.indexOf(Buffer.from([0xFF, 0xD8]));
+            if (startIdx === -1) {
+                // No JPEG start found — discard everything
+                currentBuffer = Buffer.alloc(0);
+                break;
+            }
+
+            // Discard any garbage before the JPEG start
+            if (startIdx > 0) {
+                currentBuffer = currentBuffer.subarray(startIdx);
+            }
+
+            // Look for end marker AFTER the start (skip the first 2 bytes of SOI)
+            const endIdx = currentBuffer.indexOf(Buffer.from([0xFF, 0xD9]), 2);
+            if (endIdx === -1) {
+                // Incomplete frame — wait for more data
+                break;
+            }
+
+            // Complete frame found
+            latestFrame = currentBuffer.subarray(0, endIdx + 2);
             currentBuffer = currentBuffer.subarray(endIdx + 2);
+            // Loop to extract any additional complete frames (keep only latest)
         }
     });
 

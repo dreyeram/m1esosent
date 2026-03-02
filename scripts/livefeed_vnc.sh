@@ -49,8 +49,7 @@ main() {
         v4l2src device=${VIDEO_DEVICE} io-mode=mmap do-timestamp=true \
         ! image/jpeg,width=1920,height=1080 \
         ! queue leaky=downstream max-size-buffers=2 \
-        ! multipartmux \
-        ! tcpserversink host=127.0.0.1 port=5000 sync=false &
+        ! tcpserversink host=127.0.0.1 port=5000 sync=false async=false &
 
     GST_PID=$!
     log "GStreamer running (PID: $GST_PID)."

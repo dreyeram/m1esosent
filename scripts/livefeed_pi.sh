@@ -92,7 +92,7 @@ main() {
     
     local pipeline="v4l2src device=${VIDEO_DEVICE} io-mode=mmap do-timestamp=true ! image/jpeg ! tee name=t \
         t. ! queue leaky=downstream max-size-buffers=1 ! jpegdec ! videoconvert ! kmssink render-rectangle=\"${DISP_RECT}\" sync=false async=false \
-        t. ! queue leaky=downstream max-size-buffers=2 ! multipartmux ! tcpserversink host=127.0.0.1 port=5000 sync=false"
+        t. ! queue leaky=downstream max-size-buffers=2 ! tcpserversink host=127.0.0.1 port=5000 sync=false async=false"
 
     log "Evaluating Display Sink..."
     

@@ -453,6 +453,39 @@ export function ProcedureSettingsSidebarOverlay({
                                 </p>
                             </div>
 
+                            {/* Shape Selector — pick shape before/during drawing */}
+                            <div className="space-y-2">
+                                <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest ml-1">Capture Shape</label>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        onClick={() => {
+                                            setShape('circle');
+                                            onChangeCalibrationShape?.('circle');
+                                        }}
+                                        className={`py-3 rounded-2xl text-[10px] font-bold border transition-all flex flex-col items-center gap-1 ${shape === 'circle'
+                                            ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.15)]'
+                                            : 'bg-zinc-900 border-white/5 text-zinc-500 hover:bg-white/5 hover:border-white/10'
+                                            }`}
+                                    >
+                                        <Circle size={16} />
+                                        Circle Mask
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShape('rectangle');
+                                            onChangeCalibrationShape?.('rectangle');
+                                        }}
+                                        className={`py-3 rounded-2xl text-[10px] font-bold border transition-all flex flex-col items-center gap-1 ${shape === 'rectangle'
+                                            ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.15)]'
+                                            : 'bg-zinc-900 border-white/5 text-zinc-500 hover:bg-white/5 hover:border-white/10'
+                                            }`}
+                                    >
+                                        <RectangleHorizontal size={16} />
+                                        Target Crop
+                                    </button>
+                                </div>
+                            </div>
+
                             {/* Status */}
                             <div className="bg-indigo-500/5 border border-indigo-500/10 rounded-2xl p-4 space-y-3">
                                 <div className="flex items-center gap-2">
@@ -482,26 +515,47 @@ export function ProcedureSettingsSidebarOverlay({
                                         <defs>
                                             <mask id="preview-mask">
                                                 <rect width="100%" height="100%" fill="white" />
-                                                <rect
-                                                    x={`${(calibrationArea.x - calibrationArea.width / 2) * 100}%`}
-                                                    y={`${(calibrationArea.y - calibrationArea.height / 2) * 100}%`}
-                                                    width={`${calibrationArea.width * 100}%`}
-                                                    height={`${calibrationArea.height * 100}%`}
-                                                    fill="black"
-                                                />
+                                                {shape === 'circle' ? (
+                                                    <circle
+                                                        cx={`${calibrationArea.x * 100}%`}
+                                                        cy={`${calibrationArea.y * 100}%`}
+                                                        r={`${Math.min(calibrationArea.width, calibrationArea.height) / 2 * 100}%`}
+                                                        fill="black"
+                                                    />
+                                                ) : (
+                                                    <rect
+                                                        x={`${(calibrationArea.x - calibrationArea.width / 2) * 100}%`}
+                                                        y={`${(calibrationArea.y - calibrationArea.height / 2) * 100}%`}
+                                                        width={`${calibrationArea.width * 100}%`}
+                                                        height={`${calibrationArea.height * 100}%`}
+                                                        fill="black"
+                                                    />
+                                                )}
                                             </mask>
                                         </defs>
                                         <rect width="100%" height="100%" fill="rgba(0,0,0,0.5)" mask="url(#preview-mask)" />
-                                        <rect
-                                            x={`${(calibrationArea.x - calibrationArea.width / 2) * 100}%`}
-                                            y={`${(calibrationArea.y - calibrationArea.height / 2) * 100}%`}
-                                            width={`${calibrationArea.width * 100}%`}
-                                            height={`${calibrationArea.height * 100}%`}
-                                            fill="none"
-                                            stroke="#6366f1"
-                                            strokeWidth="2"
-                                            strokeDasharray="6 3"
-                                        />
+                                        {shape === 'circle' ? (
+                                            <circle
+                                                cx={`${calibrationArea.x * 100}%`}
+                                                cy={`${calibrationArea.y * 100}%`}
+                                                r={`${Math.min(calibrationArea.width, calibrationArea.height) / 2 * 100}%`}
+                                                fill="none"
+                                                stroke="#6366f1"
+                                                strokeWidth="2"
+                                                strokeDasharray="6 3"
+                                            />
+                                        ) : (
+                                            <rect
+                                                x={`${(calibrationArea.x - calibrationArea.width / 2) * 100}%`}
+                                                y={`${(calibrationArea.y - calibrationArea.height / 2) * 100}%`}
+                                                width={`${calibrationArea.width * 100}%`}
+                                                height={`${calibrationArea.height * 100}%`}
+                                                fill="none"
+                                                stroke="#6366f1"
+                                                strokeWidth="2"
+                                                strokeDasharray="6 3"
+                                            />
+                                        )}
                                     </svg>
                                 )}
                                 {(!calibrationArea || calibrationArea.width <= 0) && (

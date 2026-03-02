@@ -1195,12 +1195,13 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         {mjpegMode && (
                             <img
                                 ref={mjpegImgRef}
-                                alt="Camera Feed"
+                                alt=""
                                 className="pointer-events-none"
                                 style={{
                                     ...videoInnerStyle,
                                     display: 'block',
                                     objectFit: 'contain',
+                                    visibility: mjpegImgRef.current?.src ? 'visible' : 'hidden',
                                 }}
                             />
                         )}
