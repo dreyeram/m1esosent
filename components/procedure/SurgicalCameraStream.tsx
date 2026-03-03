@@ -236,102 +236,52 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [deviceId, resolution]);
 
         // ═══════════════════════════════════════
-        //  MJPEG Polling Loop — Sequential frame loading from Pi daemon
-        //  Each frame must fully load before requesting the next.
-        //  Targets ~60fps (limited by network + rendering speed).
+        //  MJPEG Native Stream — Zero-tearing live feed from Pi daemon
+        //  Uses multipart/x-mixed-replace (native browser MJPEG).
+        //  The browser handles frame rendering internally with built-in
+        //  double buffering — no JavaScript polling, no blob URLs,
+        //  no src swaps, no tearing.
         // ═══════════════════════════════════════
         useEffect(() => {
             if (!mjpegMode) return;
 
-            let isActive = true;
-            let prevBlobUrl: string | null = null;
-            let consecutiveErrors = 0;
             const hostname = window.location.hostname || 'localhost';
-            const captureUrl = `http://${hostname}:5555/capture`;
+            const streamUrl = `http://${hostname}:5555/stream`;
 
-            async function loadNextFrame() {
-                if (!isActive) return;
-
-                try {
-                    const res = await fetch(`${captureUrl}?t=${Date.now()}`, {
-                        cache: 'no-store',
-                        signal: AbortSignal.timeout(1500),
-                    });
-
-                    if (!res.ok || !isActive) {
-                        consecutiveErrors++;
-                        if (isActive) setTimeout(loadNextFrame, Math.min(consecutiveErrors * 100, 2000));
-                        return;
-                    }
-
-                    const blob = await res.blob();
-                    if (!isActive || blob.size < 100) {
-                        if (isActive) setTimeout(loadNextFrame, 50);
-                        return;
-                    }
-
-                    const newUrl = URL.createObjectURL(blob);
-
-                    // DOUBLE BUFFER: Decode the frame off-screen first,
-                    // then swap it into the visible img synced with display refresh.
-                    // This eliminates screen tearing / "glassy lines" on motion.
-                    const offscreen = new Image();
-                    offscreen.src = newUrl;
-
-                    try {
-                        // decode() returns a promise that resolves when the image
-                        // is fully decoded and ready to render without jank
-                        await offscreen.decode();
-                    } catch {
-                        // decode failed (corrupt frame) — skip it
-                        URL.revokeObjectURL(newUrl);
-                        if (isActive) setTimeout(loadNextFrame, 16);
-                        return;
-                    }
-
-                    if (!isActive || !mjpegImgRef.current) {
-                        URL.revokeObjectURL(newUrl);
-                        return;
-                    }
-
-                    // Swap the decoded frame into the visible img at the next
-                    // display refresh — prevents mid-refresh tearing
-                    await new Promise<void>((resolve) => {
-                        requestAnimationFrame(() => {
-                            if (isActive && mjpegImgRef.current) {
-                                mjpegImgRef.current.src = newUrl;
-                            }
-                            resolve();
-                        });
-                    });
-
-                    if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
-                    prevBlobUrl = newUrl;
-                    consecutiveErrors = 0;
-                    if (isActive) {
-                        setStatus("connected");
-                        setMjpegHasFrame(true);
-                    }
-
-                } catch {
-                    consecutiveErrors++;
-                    if (isActive) {
-                        await new Promise(r => setTimeout(r, Math.min(consecutiveErrors * 200, 2000)));
-                    }
-                }
-
-                // Request next frame — use rAF to cap at display refresh rate
-                // and prevent frame buildup
-                if (isActive) {
-                    requestAnimationFrame(() => loadNextFrame());
-                }
+            // Simply point the img at the MJPEG stream URL —
+            // the browser handles everything from here
+            if (mjpegImgRef.current) {
+                mjpegImgRef.current.src = streamUrl;
+                console.log(`[Camera] MJPEG stream connected: ${streamUrl}`);
             }
 
-            loadNextFrame();
+            // Monitor the img for load events to track frame state
+            const img = mjpegImgRef.current;
+            if (!img) return;
+
+            const onLoad = () => {
+                setMjpegHasFrame(true);
+                setStatus("connected");
+            };
+            const onError = () => {
+                console.warn("[Camera] MJPEG stream error — will auto-reconnect");
+                // Browser auto-reconnects for MJPEG streams on most errors;
+                // if it doesn't, re-set the src after a short delay
+                setTimeout(() => {
+                    if (img && mjpegMode) {
+                        img.src = `${streamUrl}?t=${Date.now()}`;
+                    }
+                }, 2000);
+            };
+
+            img.addEventListener('load', onLoad);
+            img.addEventListener('error', onError);
 
             return () => {
-                isActive = false;
-                if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+                img.removeEventListener('load', onLoad);
+                img.removeEventListener('error', onError);
+                // Clear the stream to close the HTTP connection
+                if (img) img.src = '';
             };
         }, [mjpegMode]);
 

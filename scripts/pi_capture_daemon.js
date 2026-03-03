@@ -3,9 +3,14 @@ const http = require('http');
 const { spawn, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const EventEmitter = require('events');
 
 let latestFrame = null;
 let currentBuffer = Buffer.alloc(0);
+
+// Frame event emitter — notifies /stream clients when a new frame arrives
+const frameEmitter = new EventEmitter();
+frameEmitter.setMaxListeners(20); // Support up to 20 concurrent stream viewers
 
 // Connect to GStreamer TCP Server (tcpserversink port 5000)
 const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB safety cap
@@ -49,9 +54,10 @@ function connectToGStreamer() {
                 break;
             }
 
-            // Complete frame found
+            // Complete frame found — store and notify stream clients
             latestFrame = currentBuffer.subarray(0, endIdx + 2);
             currentBuffer = currentBuffer.subarray(endIdx + 2);
+            frameEmitter.emit('frame', latestFrame);
             // Loop to extract any additional complete frames (keep only latest)
         }
     });
@@ -107,6 +113,47 @@ const server = http.createServer((req, res) => {
     } else if (pathname === '/status') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: latestFrame ? 'streaming' : 'waiting' }));
+
+    } else if (pathname === '/stream') {
+        // ─── MJPEG STREAM ────────────────────────────────────────
+        // Native browser MJPEG: <img src="/stream"> just works.
+        // The browser handles frame rendering with built-in double
+        // buffering — no JavaScript polling, no blob URLs, no tearing.
+        // ──────────────────────────────────────────────────────────
+        const BOUNDARY = '--mjpegboundary';
+        res.writeHead(200, {
+            'Content-Type': `multipart/x-mixed-replace; boundary=${BOUNDARY}`,
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Content-Type-Options': 'nosniff',
+        });
+
+        // Send the current frame immediately (if available)
+        function sendFrame(frame) {
+            try {
+                res.write(`${BOUNDARY}\r\n`);
+                res.write(`Content-Type: image/jpeg\r\n`);
+                res.write(`Content-Length: ${frame.length}\r\n`);
+                res.write(`\r\n`);
+                res.write(frame);
+                res.write(`\r\n`);
+            } catch {
+                // Client disconnected — cleanup handled below
+            }
+        }
+
+        if (latestFrame) sendFrame(latestFrame);
+
+        // Push new frames as they arrive from GStreamer
+        const onFrame = (frame) => sendFrame(frame);
+        frameEmitter.on('frame', onFrame);
+
+        // Cleanup when client disconnects
+        req.on('close', () => {
+            frameEmitter.removeListener('frame', onFrame);
+        });
+        // Don't call res.end() — stream stays open until client disconnects
     } else if (pathname.startsWith('/record/start')) {
         if (activeRecordingProcess) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
