@@ -127,6 +127,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         const [mjpegMode, setMjpegMode] = useState(false);
         const [mjpegHasFrame, setMjpegHasFrame] = useState(false);
         const mjpegImgRef = useRef<HTMLImageElement>(null);
+        const mjpegCanvasRef = useRef<HTMLCanvasElement>(null);
         const mjpegRafRef = useRef<number | null>(null);
 
         useEffect(() => {
@@ -236,52 +237,68 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [deviceId, resolution]);
 
         // ═══════════════════════════════════════
-        //  MJPEG Native Stream — Zero-tearing live feed from Pi daemon
-        //  Uses multipart/x-mixed-replace (native browser MJPEG).
-        //  The browser handles frame rendering internally with built-in
-        //  double buffering — no JavaScript polling, no blob URLs,
-        //  no src swaps, no tearing.
+        //  MJPEG Canvas Renderer — Zero-tearing live feed
+        //  Off-screen Image consumes the MJPEG stream from the daemon.
+        //  A rAF loop draws the current frame to a visible <canvas>.
+        //  canvas.drawImage() goes through Chromium's GPU compositor
+        //  which IS vsync'd — unlike <img> multipart/x-mixed-replace.
         // ═══════════════════════════════════════
         useEffect(() => {
             if (!mjpegMode) return;
 
             const hostname = window.location.hostname || 'localhost';
             const streamUrl = `http://${hostname}:5555/stream`;
+            const canvas = mjpegCanvasRef.current;
+            if (!canvas) return;
 
-            // Simply point the img at the MJPEG stream URL —
-            // the browser handles everything from here
-            if (mjpegImgRef.current) {
-                mjpegImgRef.current.src = streamUrl;
-                console.log(`[Camera] MJPEG stream connected: ${streamUrl}`);
-            }
+            const ctx = canvas.getContext('2d', { alpha: false });
+            if (!ctx) return;
 
-            // Monitor the img for load events to track frame state
-            const img = mjpegImgRef.current;
-            if (!img) return;
+            // Off-screen image receives the MJPEG stream (hidden, never rendered)
+            const offscreenImg = new Image();
+            offscreenImg.crossOrigin = 'anonymous';
+            let isActive = true;
+            let hasReceivedFrame = false;
 
-            const onLoad = () => {
-                setMjpegHasFrame(true);
-                setStatus("connected");
+            offscreenImg.onload = () => {
+                if (!hasReceivedFrame) {
+                    hasReceivedFrame = true;
+                    // Set canvas resolution to match the stream
+                    canvas.width = offscreenImg.naturalWidth || 1920;
+                    canvas.height = offscreenImg.naturalHeight || 1080;
+                    setMjpegHasFrame(true);
+                    setStatus('connected');
+                    console.log(`[Camera] MJPEG stream active: ${canvas.width}x${canvas.height}`);
+                }
             };
-            const onError = () => {
-                console.warn("[Camera] MJPEG stream error — will auto-reconnect");
-                // Browser auto-reconnects for MJPEG streams on most errors;
-                // if it doesn't, re-set the src after a short delay
+
+            offscreenImg.onerror = () => {
+                console.warn('[Camera] MJPEG stream error — reconnecting in 2s');
                 setTimeout(() => {
-                    if (img && mjpegMode) {
-                        img.src = `${streamUrl}?t=${Date.now()}`;
-                    }
+                    if (isActive) offscreenImg.src = `${streamUrl}?t=${Date.now()}`;
                 }, 2000);
             };
 
-            img.addEventListener('load', onLoad);
-            img.addEventListener('error', onError);
+            // Start the stream
+            offscreenImg.src = streamUrl;
+            console.log(`[Camera] MJPEG stream connecting: ${streamUrl}`);
+
+            // rAF draw loop — draws the off-screen image's current frame
+            // to the visible canvas at the display's refresh rate.
+            // canvas.drawImage() is composited by Chromium's GPU at vsync.
+            function renderLoop() {
+                if (!isActive) return;
+                if (offscreenImg.complete && offscreenImg.naturalWidth > 0) {
+                    ctx.drawImage(offscreenImg, 0, 0, canvas.width, canvas.height);
+                }
+                mjpegRafRef.current = requestAnimationFrame(renderLoop);
+            }
+            mjpegRafRef.current = requestAnimationFrame(renderLoop);
 
             return () => {
-                img.removeEventListener('load', onLoad);
-                img.removeEventListener('error', onError);
-                // Clear the stream to close the HTTP connection
-                if (img) img.src = '';
+                isActive = false;
+                if (mjpegRafRef.current) cancelAnimationFrame(mjpegRafRef.current);
+                offscreenImg.src = ''; // Close the stream connection
             };
         }, [mjpegMode]);
 
@@ -1191,24 +1208,17 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         height: "100%",
                         background: "transparent",
                     }}>
-                        {/* MJPEG Mode — Pi capture daemon feed */}
+                        {/* MJPEG Mode — Canvas-based feed (GPU-composited, vsync'd) */}
                         {mjpegMode && (
-                            <img
-                                ref={mjpegImgRef}
-                                alt=""
+                            <canvas
+                                ref={mjpegCanvasRef}
                                 className="pointer-events-none"
                                 style={{
-                                    // Fill the 16:9 container exactly — GStreamer outputs native
-                                    // 1920x1080 MJPEG so objectFit:fill is correct and distortion-free.
-                                    // Do NOT use videoInnerStyle here — it applies captureArea
-                                    // translate/scale transforms intended for calibration mode only,
-                                    // which caused top/bottom cropping on the live feed.
                                     position: 'absolute',
                                     top: 0,
                                     left: 0,
                                     width: '100%',
                                     height: '100%',
-                                    objectFit: 'fill',
                                     display: 'block',
                                     visibility: mjpegHasFrame ? 'visible' : 'hidden',
                                     transform: mirrored ? 'scaleX(-1)' : 'none',
