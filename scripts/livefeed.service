@@ -28,8 +28,8 @@ StandardError=journal
 
 # Environment — camera parameters
 Environment=VIDEO_DEVICE=/dev/video0
-Environment=WIDTH=1920
-Environment=HEIGHT=1080
+Environment=WIDTH=1280
+Environment=HEIGHT=720
 Environment=FRAMERATE=30
 
 # Allow time for camera device + DRM to be ready
