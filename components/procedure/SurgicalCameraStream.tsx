@@ -127,8 +127,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         const [mjpegMode, setMjpegMode] = useState(false);
         const [mjpegHasFrame, setMjpegHasFrame] = useState(false);
         const mjpegImgRef = useRef<HTMLImageElement>(null);
-        const mjpegCanvasRef = useRef<HTMLCanvasElement>(null);
-        const mjpegRafRef = useRef<number | null>(null);
 
         useEffect(() => {
             if (typeof window === 'undefined') return;
@@ -237,102 +235,53 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [deviceId, resolution]);
 
         // ═══════════════════════════════════════
-        //  MJPEG Atomic Frame Renderer — Zero Tearing
+        //  Native MJPEG stream — matches reference Pi app exactly
         //
-        //  Root cause of tearing:
-        //    drawImage(img) can execute while the browser is still decoding
-        //    the JPEG — resulting in partial frames being painted.
-        //
-        //  Fix:
-        //    1. Fetch each frame as Blob from /capture (complete discrete frame)
-        //    2. createImageBitmap(blob) fully decodes JPEG before resolving
-        //    3. transferFromImageBitmap() atomically transfers at vsync
-        //    4. will-change:transform forces canvas onto own GPU layer
-        //
-        //  Matches the reference Pi app: cv2.read() waits for a complete
-        //  frame before returning — same guarantee, different stack.
+        //  The Pi daemon serves multipart/x-mixed-replace; boundary=frame
+        //  with NO Content-Length per part (same as Django StreamingHttpResponse).
+        //  The browser's native <img> MJPEG decoder atomically swaps the
+        //  displayed frame each time it sees a new --frame boundary.
+        //  Zero JavaScript frame timing — the browser handles it natively.
         // ═══════════════════════════════════════
         useEffect(() => {
             if (!mjpegMode) return;
+            const img = mjpegImgRef.current;
+            if (!img) return;
 
             const hostname = window.location.hostname || 'localhost';
-            const captureUrl = `http://${hostname}:5555/capture`;
-            const cvs = mjpegCanvasRef.current;
-            if (!cvs) return;
+            const streamUrl = `http://${hostname}:5555/stream`;
 
-            // Use ImageBitmapRenderingContext if available — atomically transfers
-            // fully decoded bitmaps to canvas at compositor vsync boundary.
-            // Falls back to 2D context for older browsers.
-            const bitmapCtx = cvs.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
-            const ctx2d = !bitmapCtx ? cvs.getContext('2d', { alpha: false }) : null;
+            // Reconnect helper
+            let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+            let active = true;
 
-            let isActive = true;
-            let hasReceivedFrame = false;
-            let rafId: number | null = null;
+            const onLoad = () => {
+                // The img element has received its first frame
+                setMjpegHasFrame(true);
+                setStatus('connected');
+            };
 
-            // Sequential fetch loop:
-            //   fetch complete JPEG → decode → render at vsync → fetch next
-            // Sequential = no buffer pileup, every rendered frame is complete.
-            async function fetchAndRenderFrame() {
-                if (!isActive) return;
+            const onError = () => {
+                if (!active) return;
+                console.warn('[Camera] Stream error — reconnecting in 2s');
+                reconnectTimer = setTimeout(() => {
+                    if (active && img) img.src = `${streamUrl}?t=${Date.now()}`;
+                }, 2000);
+            };
 
-                try {
-                    const res = await fetch(`${captureUrl}?t=${Date.now()}`, {
-                        method: 'GET',
-                        cache: 'no-store',
-                    });
+            img.addEventListener('load', onLoad);
+            img.addEventListener('error', onError);
 
-                    if (!res.ok || !isActive) {
-                        if (isActive) setTimeout(fetchAndRenderFrame, 300);
-                        return;
-                    }
-
-                    const blob = await res.blob();
-                    if (!isActive) return;
-
-                    // Fully decode JPEG — createImageBitmap only resolves when complete.
-                    // This is the key: we NEVER draw a partially decoded frame.
-                    const bitmap = await createImageBitmap(blob);
-                    if (!isActive) { bitmap.close(); return; }
-
-                    // First frame: set canvas resolution
-                    if (!hasReceivedFrame) {
-                        hasReceivedFrame = true;
-                        cvs!.width = bitmap.width;
-                        cvs!.height = bitmap.height;
-                        setMjpegHasFrame(true);
-                        setStatus('connected');
-                        console.log(`[Camera] Feed active: ${bitmap.width}x${bitmap.height}`);
-                    }
-
-                    // Paint at next vsync via rAF
-                    rafId = requestAnimationFrame(() => {
-                        if (!isActive) { bitmap.close(); return; }
-                        if (bitmapCtx) {
-                            // Atomic compositor transfer — GPU paints this at vsync
-                            bitmapCtx.transferFromImageBitmap(bitmap);
-                        } else if (ctx2d) {
-                            ctx2d.drawImage(bitmap, 0, 0, cvs!.width, cvs!.height);
-                            bitmap.close();
-                        }
-                        // Fetch next frame immediately after render
-                        if (isActive) fetchAndRenderFrame();
-                    });
-
-                } catch (err) {
-                    if (isActive) {
-                        console.warn('[Camera] Frame fetch error, retrying:', err);
-                        setTimeout(fetchAndRenderFrame, 300);
-                    }
-                }
-            }
-
-            console.log(`[Camera] Starting atomic frame loop: ${captureUrl}`);
-            fetchAndRenderFrame();
+            // Connect: browser opens the stream, native decoder takes over
+            img.src = streamUrl;
+            console.log(`[Camera] Native MJPEG stream: ${streamUrl}`);
 
             return () => {
-                isActive = false;
-                if (rafId !== null) cancelAnimationFrame(rafId);
+                active = false;
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                img.removeEventListener('load', onLoad);
+                img.removeEventListener('error', onError);
+                img.src = ''; // Close the HTTP connection
             };
         }, [mjpegMode]);
 
@@ -1242,10 +1191,12 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         height: "100%",
                         background: "transparent",
                     }}>
-                        {/* MJPEG Mode — Atomic bitmap canvas (GPU-composited, vsync'd) */}
+                        {/* MJPEG live feed — native browser MJPEG decoder */}
+                        {/* Matches reference Pi app: <img src="/api/video_feed"> */}
                         {mjpegMode && (
-                            <canvas
-                                ref={mjpegCanvasRef}
+                            <img
+                                ref={mjpegImgRef}
+                                alt=""
                                 className="pointer-events-none"
                                 style={{
                                     position: 'absolute',
@@ -1253,22 +1204,13 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                                     left: 0,
                                     width: '100%',
                                     height: '100%',
+                                    objectFit: 'fill',
                                     display: 'block',
                                     visibility: mjpegHasFrame ? 'visible' : 'hidden',
-                                    transform: mirrored ? 'scaleX(-1)' : 'translateZ(0)',
-                                    willChange: 'transform',
+                                    transform: mirrored ? 'scaleX(-1)' : 'none',
                                 }}
                             />
                         )}
-                        {/* DEBUG: Temporary state indicator — remove after fixing */}
-                        <div style={{
-                            position: 'absolute', top: 4, left: 4, zIndex: 999,
-                            background: 'rgba(0,0,0,0.7)', color: '#0f0', fontSize: '11px',
-                            padding: '2px 6px', borderRadius: 3, fontFamily: 'monospace',
-                            pointerEvents: 'none',
-                        }}>
-                            mjpeg:{mjpegMode ? 'Y' : 'N'} frame:{mjpegHasFrame ? 'Y' : 'N'} st:{status}
-                        </div>
                         {/* Dev Mode local camera fallback (Only plays if stream attached) */}
                         <video
                             ref={videoRef}

@@ -1,18 +1,24 @@
-// ═══════════════════════════════════════════════════════════════════
-//  Pi Capture Daemon — Direct MJPEG Capture from USB Camera
-//  
-//  Uses ffmpeg to read MJPEG frames directly from /dev/video0.
-//  The camera natively outputs MJPEG, so -c:v copy = ZERO CPU transcode.
-//  Frames are extracted from ffmpeg's stdout and served via HTTP.
+// ═══════════════════════════════════════════════════════════════
+//  pi_capture_daemon.js  —  Direct MJPEG camera capture daemon
+//
+//  Captures MJPEG frames from /dev/video0 using ffmpeg (zero
+//  transcode: camera natively outputs MJPEG, passed through as-is).
+//
+//  Stream format exactly matches the reference Pi Django app:
+//    Content-Type: multipart/x-mixed-replace; boundary=frame
+//    Each part: --frame\r\nContent-Type: image/jpeg\r\n\r\n{bytes}\r\n
+//    NO Content-Length header in parts (matches Django StreamingHttpResponse)
 //
 //  Endpoints:
-//    GET /stream   → MJPEG stream (multipart/x-mixed-replace)
-//    GET /capture  → Single JPEG frame (latest from RAM)
-//    GET /status   → JSON status { status: 'streaming' | 'waiting' }
-//    GET /record/start → Start recording to MP4
-//    GET /record/stop  → Stop recording
-//    GET /ptz?pan=&tilt=&zoom= → PTZ camera controls
-// ═══════════════════════════════════════════════════════════════════
+//    GET /stream          MJPEG live stream  (<img src="/stream"> works)
+//    GET /capture         Latest single JPEG frame
+//    GET /status          JSON {status: 'streaming'|'waiting'}
+//    GET /record/start    Start MP4 recording
+//    GET /record/stop     Stop recording
+//    GET /ptz?pan=&tilt=&zoom=   PTZ controls (v4l2-ctl)
+// ═══════════════════════════════════════════════════════════════
+
+'use strict';
 
 const http = require('http');
 const { spawn, exec } = require('child_process');
@@ -20,200 +26,176 @@ const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
 
-// ─── Configuration ───────────────────────────────────────────────
+// ─── Configuration (set via PM2 env or process.env) ─────────────
 const VIDEO_DEVICE = process.env.VIDEO_DEVICE || '/dev/video0';
 const WIDTH = process.env.WIDTH || '1920';
 const HEIGHT = process.env.HEIGHT || '1080';
 const FRAMERATE = process.env.FRAMERATE || '30';
 const HTTP_PORT = 5555;
 
-// ─── State ───────────────────────────────────────────────────────
-let latestFrame = null;
-let ffmpegProcess = null;
-let currentBuffer = Buffer.alloc(0);
-let activeRecordingProcess = null;
+// ─── Frame state ────────────────────────────────────────────────
+let latestFrame = null;          // Buffer — last complete JPEG
+let captureProc = null;          // ffmpeg child process
+let parseBuffer = Buffer.alloc(0);
+let activeRecordingProc = null;
 let recordingFilePath = null;
 
-// Frame event emitter — notifies /stream clients when a new frame arrives
-const frameEmitter = new EventEmitter();
-frameEmitter.setMaxListeners(20);
-
 // JPEG markers
-const JPEG_SOI = Buffer.from([0xFF, 0xD8]); // Start Of Image
-const JPEG_EOI = Buffer.from([0xFF, 0xD9]); // End Of Image
+const SOI = Buffer.from([0xFF, 0xD8]);
+const EOI = Buffer.from([0xFF, 0xD9]);
+const MAX_BUF = 10 * 1024 * 1024; // 10 MB safety cap
 
-const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB safety cap
+// Frame event bus — notifies active /stream clients
+const frameEmitter = new EventEmitter();
+frameEmitter.setMaxListeners(30);
 
-// ─── FFmpeg Direct Capture ───────────────────────────────────────
-// Reads MJPEG frames directly from the USB capture card.
-// -c:v copy = zero transcode (camera outputs MJPEG natively)
-// -f image2pipe = outputs individual JPEG frames to stdout
-// ─────────────────────────────────────────────────────────────────
+// ─── MJPEG part builder — EXACT match of reference Django app ───
+// Reference:
+//   yield (b'--frame\r\n'
+//          b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+// No Content-Length — lets the browser stream continuously without
+// waiting for a declared byte count before swapping the frame.
+function buildMjpegPart(jpegBuffer) {
+    // Pre-build a single Buffer to write atomically (one syscall)
+    const header = Buffer.from('--frame\r\nContent-Type: image/jpeg\r\n\r\n');
+    const trailer = Buffer.from('\r\n');
+    return Buffer.concat([header, jpegBuffer, trailer]);
+}
+
+// ─── ffmpeg capture ─────────────────────────────────────────────
 function startCapture() {
-    if (ffmpegProcess) {
-        console.log('[Capture] Already running, skipping restart.');
-        return;
-    }
+    if (captureProc) return;
 
-    // Wait for device to exist
     if (!fs.existsSync(VIDEO_DEVICE)) {
-        console.log(`[Capture] Waiting for ${VIDEO_DEVICE}...`);
+        console.log(`[Capture] ${VIDEO_DEVICE} not found — retrying in 2s...`);
         setTimeout(startCapture, 2000);
         return;
     }
 
-    console.log(`[Capture] Starting ffmpeg: ${VIDEO_DEVICE} ${WIDTH}x${HEIGHT}@${FRAMERATE}fps`);
+    console.log(`[Capture] ffmpeg: ${VIDEO_DEVICE} ${WIDTH}x${HEIGHT} @${FRAMERATE}fps`);
 
-    ffmpegProcess = spawn('ffmpeg', [
+    // -c:v copy  = zero transcode (camera outputs MJPEG natively)
+    // image2pipe = individual JPEG frames on stdout
+    captureProc = spawn('ffmpeg', [
+        '-loglevel', 'error',
         '-f', 'v4l2',
         '-input_format', 'mjpeg',
         '-video_size', `${WIDTH}x${HEIGHT}`,
         '-framerate', FRAMERATE,
         '-i', VIDEO_DEVICE,
-        '-c:v', 'copy',          // Zero transcode — pass MJPEG through untouched
-        '-f', 'image2pipe',      // Output individual JPEG frames to stdout
+        '-c:v', 'copy',
+        '-f', 'image2pipe',
         '-vcodec', 'mjpeg',
-        '-'                      // Output to stdout
-    ], {
-        stdio: ['pipe', 'pipe', 'pipe']  // stdin, stdout, stderr
-    });
+        'pipe:1'            // stdout
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    currentBuffer = Buffer.alloc(0);
+    parseBuffer = Buffer.alloc(0);
 
-    ffmpegProcess.stdout.on('data', (data) => {
-        currentBuffer = Buffer.concat([currentBuffer, data]);
+    captureProc.stdout.on('data', (chunk) => {
+        parseBuffer = Buffer.concat([parseBuffer, chunk]);
 
-        // Safety: cap buffer size
-        if (currentBuffer.length > MAX_BUFFER_SIZE) {
-            currentBuffer = currentBuffer.subarray(currentBuffer.length - 2 * 1024 * 1024);
+        // Guard: prevent unbounded growth
+        if (parseBuffer.length > MAX_BUF) {
+            parseBuffer = parseBuffer.slice(parseBuffer.length - 2 * 1024 * 1024);
         }
 
-        // Extract complete JPEG frames
+        // Extract every complete JPEG frame from the stream
         while (true) {
-            const startIdx = currentBuffer.indexOf(JPEG_SOI);
-            if (startIdx === -1) {
-                currentBuffer = Buffer.alloc(0);
-                break;
-            }
+            const start = parseBuffer.indexOf(SOI);
+            if (start === -1) { parseBuffer = Buffer.alloc(0); break; }
+            if (start > 0) { parseBuffer = parseBuffer.slice(start); }
 
-            // Discard garbage before SOI
-            if (startIdx > 0) {
-                currentBuffer = currentBuffer.subarray(startIdx);
-            }
+            const end = parseBuffer.indexOf(EOI, 2);
+            if (end === -1) break;   // Incomplete frame — wait for more data
 
-            // Find EOI after SOI
-            const endIdx = currentBuffer.indexOf(JPEG_EOI, 2);
-            if (endIdx === -1) {
-                break; // Incomplete frame — wait for more data
-            }
+            const frame = Buffer.from(parseBuffer.slice(0, end + 2));
+            parseBuffer = parseBuffer.slice(end + 2);
 
-            // Complete frame!
-            const frame = Buffer.from(currentBuffer.subarray(0, endIdx + 2));
-            currentBuffer = currentBuffer.subarray(endIdx + 2);
             latestFrame = frame;
             frameEmitter.emit('frame', frame);
         }
     });
 
-    ffmpegProcess.stderr.on('data', (data) => {
-        const msg = data.toString().trim();
-        // Only log non-progress lines (avoid flooding)
-        if (msg && !msg.startsWith('frame=') && !msg.startsWith('size=')) {
-            console.log(`[ffmpeg] ${msg}`);
-        }
+    captureProc.stderr.on('data', (d) => {
+        const s = d.toString().trim();
+        if (s) console.error(`[ffmpeg] ${s}`);
     });
 
-    ffmpegProcess.on('close', (code) => {
-        console.log(`[Capture] ffmpeg exited with code ${code}. Restarting in 3s...`);
-        ffmpegProcess = null;
+    captureProc.on('close', (code) => {
+        console.log(`[Capture] ffmpeg exited (${code}) — restarting in 3s`);
+        captureProc = null;
         latestFrame = null;
-        currentBuffer = Buffer.alloc(0);
+        parseBuffer = Buffer.alloc(0);
         setTimeout(startCapture, 3000);
     });
 
-    ffmpegProcess.on('error', (err) => {
-        console.error(`[Capture] ffmpeg spawn error: ${err.message}`);
-        ffmpegProcess = null;
+    captureProc.on('error', (err) => {
+        console.error(`[Capture] spawn error: ${err.message}`);
+        captureProc = null;
         setTimeout(startCapture, 3000);
     });
 }
 
-// Start capturing
 startCapture();
 
-// ─── HTTP API Server ─────────────────────────────────────────────
+// ─── HTTP server ─────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
-    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const pathname = parsedUrl.pathname;
+    const url = new URL(req.url, `http://localhost`);
+    const pathname = url.pathname;
 
-    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
 
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-    }
+    if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
-    // ── GET /capture — Single JPEG frame ──
-    if (pathname === '/capture' && req.method === 'GET') {
+    // ── /stream  ─────────────────────────────────────────────────
+    // Browser points an <img> element here.
+    // The browser's native MJPEG decoder atomically swaps frames
+    // when it sees the next --frame boundary (no JavaScript needed).
+    if (pathname === '/stream') {
+        res.writeHead(200, {
+            'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Pragma': 'no-cache',
+        });
+
+        // Send the current frame immediately so the <img> shows up at once
         if (latestFrame) {
-            res.writeHead(200, {
-                'Content-Type': 'image/jpeg',
-                'Content-Length': latestFrame.length,
-                'Cache-Control': 'no-cache'
-            });
-            res.end(latestFrame);
-        } else {
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'No frame available yet' }));
+            res.write(buildMjpegPart(latestFrame));
         }
 
-        // ── GET /status — JSON status ──
+        const onFrame = (frame) => {
+            try { res.write(buildMjpegPart(frame)); }
+            catch { /* client gone */ }
+        };
+
+        frameEmitter.on('frame', onFrame);
+        req.on('close', () => { frameEmitter.removeListener('frame', onFrame); });
+        // Stream stays open — do NOT call res.end()
+
+        // ── /capture  ────────────────────────────────────────────────
+    } else if (pathname === '/capture') {
+        if (!latestFrame) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'No frame yet' }));
+            return;
+        }
+        res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Content-Length': latestFrame.length,
+            'Cache-Control': 'no-cache',
+        });
+        res.end(latestFrame);
+
+        // ── /status  ─────────────────────────────────────────────────
     } else if (pathname === '/status') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: latestFrame ? 'streaming' : 'waiting' }));
 
-        // ── GET /stream — MJPEG live stream ──
-    } else if (pathname === '/stream') {
-        // multipart/x-mixed-replace — browser-native MJPEG rendering
-        // The browser handles frame timing and double buffering internally
-        const BOUNDARY = '--frame';
-        res.writeHead(200, {
-            'Content-Type': `multipart/x-mixed-replace; boundary=frame`,
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Connection': 'keep-alive',
-        });
-
-        function sendFrame(frame) {
-            try {
-                res.write(`${BOUNDARY}\r\n`);
-                res.write(`Content-Type: image/jpeg\r\n`);
-                res.write(`Content-Length: ${frame.length}\r\n`);
-                res.write(`\r\n`);
-                res.write(frame);
-                res.write(`\r\n`);
-            } catch {
-                // Client disconnected
-            }
-        }
-
-        // Send current frame immediately
-        if (latestFrame) sendFrame(latestFrame);
-
-        // Push new frames as they arrive
-        const onFrame = (frame) => sendFrame(frame);
-        frameEmitter.on('frame', onFrame);
-
-        req.on('close', () => {
-            frameEmitter.removeListener('frame', onFrame);
-        });
-
-        // ── GET /record/start — Start MP4 recording ──
+        // ── /record/start  ───────────────────────────────────────────
     } else if (pathname.startsWith('/record/start')) {
-        if (activeRecordingProcess) {
+        if (activeRecordingProc) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Already recording' }));
             return;
@@ -224,11 +206,10 @@ const server = http.createServer((req, res) => {
 
         const filename = `record_${Date.now()}.mp4`;
         recordingFilePath = path.join(mediaDir, filename);
+        console.log(`[Record] → ${recordingFilePath}`);
 
-        console.log(`[Record] Starting → ${recordingFilePath}`);
-
-        // Record directly from the camera device
-        activeRecordingProcess = spawn('ffmpeg', [
+        activeRecordingProc = spawn('ffmpeg', [
+            '-loglevel', 'error',
             '-f', 'v4l2',
             '-input_format', 'mjpeg',
             '-video_size', `${WIDTH}x${HEIGHT}`,
@@ -237,53 +218,40 @@ const server = http.createServer((req, res) => {
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
             '-crf', '28',
-            '-y',
-            recordingFilePath
-        ]);
+            '-y', recordingFilePath
+        ], { stdio: ['pipe', 'ignore', 'ignore'] });
 
-        activeRecordingProcess.stderr.on('data', () => { });
-        activeRecordingProcess.on('close', (code) => {
-            console.log(`[Record] ffmpeg exited with code ${code}`);
-            activeRecordingProcess = null;
-        });
+        activeRecordingProc.on('close', () => { activeRecordingProc = null; });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'recording_started', filePath: `/data/media/${filename}` }));
 
-        // ── GET /record/stop — Stop recording ──
+        // ── /record/stop  ────────────────────────────────────────────
     } else if (pathname.startsWith('/record/stop')) {
-        if (!activeRecordingProcess) {
+        if (!activeRecordingProc) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Not recording' }));
             return;
         }
-
-        console.log('[Record] Stopping...');
-        activeRecordingProcess.stdin.write('q\n');
-
+        activeRecordingProc.stdin.write('q\n');
         const savedUrl = `/api/capture-serve?path=${encodeURIComponent(recordingFilePath)}`;
-        activeRecordingProcess = null;
+        activeRecordingProc = null;
         recordingFilePath = null;
-
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'success', filename: savedUrl }));
 
-        // ── GET /ptz — Camera PTZ controls ──
+        // ── /ptz  ────────────────────────────────────────────────────
     } else if (pathname.startsWith('/ptz')) {
-        const urlParams = parsedUrl.searchParams;
-        let commands = [];
-
-        if (urlParams.has('zoom')) commands.push(`zoom_absolute=${urlParams.get('zoom')}`);
-        if (urlParams.has('pan')) commands.push(`pan_absolute=${urlParams.get('pan')}`);
-        if (urlParams.has('tilt')) commands.push(`tilt_absolute=${urlParams.get('tilt')}`);
-
-        if (commands.length > 0) {
-            exec(`v4l2-ctl -d ${VIDEO_DEVICE} -c ${commands.join(',')}`, (err) => {
-                if (err) console.error('[PTZ] Command failed:', err.message);
-            });
-        }
+        const p = url.searchParams;
+        const cmds = [];
+        if (p.has('zoom')) cmds.push(`zoom_absolute=${p.get('zoom')}`);
+        if (p.has('pan')) cmds.push(`pan_absolute=${p.get('pan')}`);
+        if (p.has('tilt')) cmds.push(`tilt_absolute=${p.get('tilt')}`);
+        if (cmds.length)
+            exec(`v4l2-ctl -d ${VIDEO_DEVICE} -c ${cmds.join(',')}`,
+                (err) => { if (err) console.error('[PTZ]', err.message); });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'success' }));
+        res.end(JSON.stringify({ status: 'ok' }));
 
     } else {
         res.writeHead(404);
@@ -293,25 +261,18 @@ const server = http.createServer((req, res) => {
 
 server.listen(HTTP_PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════════════════');
-    console.log(` PI CAPTURE DAEMON — http://0.0.0.0:${HTTP_PORT}`);
-    console.log(` Camera: ${VIDEO_DEVICE} ${WIDTH}x${HEIGHT}@${FRAMERATE}fps`);
-    console.log(` Mode: Direct ffmpeg capture (zero transcode)`);
+    console.log(` CAPTURE DAEMON  http://0.0.0.0:${HTTP_PORT}`);
+    console.log(` Device : ${VIDEO_DEVICE}  ${WIDTH}x${HEIGHT}@${FRAMERATE}fps`);
+    console.log(` Stream : http://0.0.0.0:${HTTP_PORT}/stream`);
     console.log('═══════════════════════════════════════════════════');
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('[Daemon] SIGTERM received, shutting down...');
-    if (ffmpegProcess) ffmpegProcess.kill('SIGTERM');
-    if (activeRecordingProcess) activeRecordingProcess.kill('SIGTERM');
+// ─── Graceful shutdown ───────────────────────────────────────────
+function shutdown() {
+    if (captureProc) captureProc.kill('SIGTERM');
+    if (activeRecordingProc) activeRecordingProc.kill('SIGTERM');
     server.close();
     process.exit(0);
-});
-
-process.on('SIGINT', () => {
-    console.log('[Daemon] SIGINT received, shutting down...');
-    if (ffmpegProcess) ffmpegProcess.kill('SIGTERM');
-    if (activeRecordingProcess) activeRecordingProcess.kill('SIGTERM');
-    server.close();
-    process.exit(0);
-});
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
