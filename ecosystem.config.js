@@ -27,9 +27,9 @@ module.exports = {
             cwd: '/home/lm/loyalmed',
             env: {
                 VIDEO_DEVICE: '/dev/video0',
-                WIDTH: '1280',
-                HEIGHT: '720',
-                FRAMERATE: '30',
+                WIDTH: '1920',
+                HEIGHT: '1080',
+                FRAMERATE: '60',
             },
             instances: 1,
             autorestart: true,

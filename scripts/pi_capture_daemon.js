@@ -74,18 +74,18 @@ function startCapture() {
 
     console.log(`[Capture] ffmpeg: ${VIDEO_DEVICE} ${WIDTH}x${HEIGHT} @${FRAMERATE}fps`);
 
-    // -c:v copy  = zero transcode (camera outputs MJPEG natively)
-    // image2pipe = individual JPEG frames on stdout
+    // -input_format yuyv422 : Capture RAW uncompressed video (bypasses faulty hardware MJPEG encoder)
+    // -c:v mjpeg -q:v 2     : Encode clean MJPEG on the Pi's CPU (excellent quality, fixes artifacts)
     captureProc = spawn('ffmpeg', [
         '-loglevel', 'error',
         '-f', 'v4l2',
-        '-input_format', 'mjpeg',
+        '-input_format', 'yuyv422',
         '-video_size', `${WIDTH}x${HEIGHT}`,
         '-framerate', FRAMERATE,
         '-i', VIDEO_DEVICE,
-        '-c:v', 'copy',
+        '-c:v', 'mjpeg',
+        '-q:v', '2',
         '-f', 'image2pipe',
-        '-vcodec', 'mjpeg',
         'pipe:1'            // stdout
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
