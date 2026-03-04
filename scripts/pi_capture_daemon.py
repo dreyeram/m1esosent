@@ -26,6 +26,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ─── Configuration ───────────────────────────────────────────────
 VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE_INDEX', '0'))
+VIDEO_DEVICE_PATH = f'/dev/video{VIDEO_DEVICE}'  # Full path for v4l2-ctl commands
 WIDTH = int(os.environ.get('WIDTH', '1920'))
 HEIGHT = int(os.environ.get('HEIGHT', '1080'))
 FRAMERATE = int(os.environ.get('FRAMERATE', '30'))
@@ -49,10 +50,11 @@ def capture_loop():
     # Aggressive Hardware Signal Cleanup
     # These settings strip out the ISP processing that causes "glassy lines" and halos.
     # We do this before opening the camera handle to ensure the hardware is initialized clean.
+    # Use the full device path for v4l2-ctl (integer index is invalid for v4l2-ctl)
     v4l2_cmds = [
-        f"v4l2-ctl -d {VIDEO_DEVICE} --set-ctrl=power_line_frequency=1", # 50Hz (India)
-        f"v4l2-ctl -d {VIDEO_DEVICE} --set-ctrl=sharpness=0",            # Disable sharpening (ringing)
-        f"v4l2-ctl -d {VIDEO_DEVICE} --set-ctrl=backlight_compensation=0" # Disable contrast banding
+        f"v4l2-ctl -d {VIDEO_DEVICE_PATH} --set-ctrl=power_line_frequency=1", # 50Hz India
+        f"v4l2-ctl -d {VIDEO_DEVICE_PATH} --set-ctrl=sharpness=0",            # No ringing halos
+        f"v4l2-ctl -d {VIDEO_DEVICE_PATH} --set-ctrl=backlight_compensation=0" # No vertical banding
     ]
     for cmd in v4l2_cmds:
         os.system(f"{cmd} 2>/dev/null")
@@ -67,11 +69,9 @@ def capture_loop():
         time.sleep(3)
         return capture_loop()
 
-    # CRITICAL: Set format to MJPEG FIRST to handle bandwidth correctly
-    # 'M', 'J', 'P', 'G'
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    
-    # Force the resolution
+    # DO NOT set FOURCC=MJPG — that requests the hardware MJPEG encoder
+    # which is FAULTY and produces corrupt frames (cv2.error: !buf.empty())
+    # Let OpenCV default to YUYV raw capture: the Pi CPU encodes clean JPEG.
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, FRAMERATE)
@@ -93,16 +93,20 @@ def capture_loop():
 
     while True:
         success, frame = cap.read()
-        if not success:
-            print("[Capture] cap.read() failed — reopening camera...")
-            camera_ok = False
-            cap.release()
-            time.sleep(1)
-            return capture_loop()
+
+        # Guard: skip empty/corrupt frames without crashing
+        if not success or frame is None or frame.size == 0:
+            print("[Capture] Empty frame from cap.read() — skipping")
+            time.sleep(0.01)
+            continue
 
         # Encode the frame as JPEG — identical to reference app
-        ret, buffer = cv2.imencode('.jpg', frame, encode_params)
-        if not ret:
+        try:
+            ret, buffer = cv2.imencode('.jpg', frame, encode_params)
+        except cv2.error as e:
+            print(f"[Capture] imencode error (skipping frame): {e}")
+            continue
+        if not ret or buffer is None:
             continue
 
         jpeg_bytes = buffer.tobytes()
