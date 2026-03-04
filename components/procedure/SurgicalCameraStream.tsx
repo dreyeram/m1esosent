@@ -6,7 +6,30 @@ import { motion } from "framer-motion";
 
 // ══════════════════════════════════════════════════════════════════════
 //  SurgicalCameraStream — Ultra-Low Latency MJPEG Surgical Video
-//  Connects to camera_server.py on port 5000 (MJPEG over HTTP)
+//
+//  CHANGES v2 (aligned with pi_capture_daemon.js v2):
+//
+//  1. CLIENT-SIDE GHOST FRAME GUARD
+//     The daemon filters ghost frames (< 5KB) server-side, but the browser
+//     MJPEG parser now also guards against them independently. Any JPEG
+//     decoded below MIN_CLIENT_FRAME_BYTES is silently discarded before
+//     createImageBitmap() is called, saving a wasted GPU decode cycle.
+//
+//  2. DAEMON FPS POLLING
+//     The new /status endpoint returns { fps, frames, dropped, resolution }.
+//     A 2-second polling interval reads these and forwards them to:
+//       - onFpsUpdate(fps)          — was always 0 before
+//       - onResolutionChange(w, h)  — was never called in MJPEG mode before
+//     The poll is active only when mjpegMode === true and the component
+//     is mounted, and is cleaned up on unmount.
+//
+//  3. STREAM RECONNECT BACKOFF
+//     Previous version retried on a fixed 2s delay.
+//     Now uses exponential backoff: 1s → 2s → 4s → 8s (capped at 8s).
+//     Resets to 1s on successful first frame.
+//
+//  All other logic (calibration, pan, zoom, crop/mask, WebRTC fallback)
+//  is unchanged.
 // ══════════════════════════════════════════════════════════════════════
 
 export interface CameraStreamHandle {
@@ -47,6 +70,11 @@ export interface SurgicalCameraStreamProps {
 
 type DragMode = 'none' | 'draw' | 'move' | 'pan' | 'resize-nw' | 'resize-ne' | 'resize-sw' | 'resize-se' | 'resize-n' | 'resize-s' | 'resize-e' | 'resize-w';
 
+// ── Client-side ghost frame guard ────────────────────────────────────
+// Matches the daemon's MIN_FRAME_BYTES (5KB). Any JPEG below this size
+// is a spurious empty-URB artifact — discard before GPU decode.
+const MIN_CLIENT_FRAME_BYTES = 5 * 1024;
+
 const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStreamProps>(
     function SurgicalCameraStream(
         {
@@ -75,36 +103,27 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         },
         ref
     ) {
-        // imgRef points to a hidden img (unused in MJPEG Canvas mode)
         const imgRef = useRef<HTMLImageElement>(null);
         const canvasRef = useRef<HTMLCanvasElement | null>(null);
-        // Canvas for vsync-synced MJPEG display (eliminates tearing)
         const canvasDisplayRef = useRef<HTMLCanvasElement>(null);
-
-        // Recording refs
         const mediaRecorderRef = useRef<MediaRecorder | null>(null);
         const recordedChunksRef = useRef<Blob[]>([]);
         const containerRef = useRef<HTMLDivElement>(null);
         const wrapperRef = useRef<HTMLDivElement>(null);
+
         const [status, setStatus] = useState<StreamStatus>("connecting");
         const [imgStreamUrl, setImgStreamUrl] = useState<string>("");
-        // Measured wrapper dimensions for pixel-perfect scope sizing
         const [wrapperSize, setWrapperSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
-
-        // Calibration drag state
         const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
         const [dragMode, setDragMode] = useState<DragMode>('none');
         const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
         const [dragStartArea, setDragStartArea] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
         const [dragStartPan, setDragStartPan] = useState<{ x: number; y: number } | null>(null);
 
-        // Notify parent of status
         useEffect(() => { onStatusChange?.(status); }, [status, onStatusChange]);
 
         // ═══════════════════════════════════════
-        //  WRAPPER MEASUREMENT — ResizeObserver for pixel-perfect scope sizing
-        //  CSS cannot reliably inscribe a square in a rectangle without JS.
-        //  We measure the parent wrapper and compute exact pixel dimensions.
+        //  WRAPPER MEASUREMENT
         // ═══════════════════════════════════════
         useEffect(() => {
             const el = wrapperRef.current;
@@ -116,7 +135,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 }
             });
             ro.observe(el);
-            // Initial measurement
             const rect = el.getBoundingClientRect();
             setWrapperSize({ w: Math.round(rect.width), h: Math.round(rect.height) });
             return () => ro.disconnect();
@@ -139,14 +157,8 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             async function initCamera() {
                 const hostname = window.location.hostname || 'localhost';
 
-                // Step 1: Try the Pi capture daemon on port 5555
-                // Retry logic:
-                //   - Allow INITIAL_GRACE_RETRIES (5 = 10s) for boot race (daemon not yet started)
-                //   - If daemon is never seen after grace period → fall to WebRTC (laptop)
-                //   - If daemon is seen at any point → keep retrying until 'streaming' or max
-                //   - If daemon returns 'streaming' → activate MJPEG mode immediately
                 const MAX_DAEMON_RETRIES = 30;
-                const INITIAL_GRACE_RETRIES = 5; // 10s grace for Pi boot race
+                const INITIAL_GRACE_RETRIES = 5;
                 let daemonExists = false;
 
                 for (let attempt = 1; attempt <= MAX_DAEMON_RETRIES; attempt++) {
@@ -160,27 +172,17 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                             const data = await statusRes.json();
                             if (data.status === 'streaming') {
                                 console.log(`[Camera] Pi daemon streaming (attempt ${attempt}) — MJPEG mode`);
-                                if (isActive) {
-                                    setMjpegMode(true);
-                                    setStatus("connected");
-                                }
+                                if (isActive) { setMjpegMode(true); setStatus("connected"); }
                                 return;
                             }
                             if (data.status === 'waiting') {
-                                console.log(`[Camera] Pi daemon waiting for GStreamer (attempt ${attempt}/${MAX_DAEMON_RETRIES})...`);
-                                // Daemon alive, GStreamer booting — activate MJPEG mode immediately
-                                // The polling loop will handle waiting for frames
-                                if (isActive) {
-                                    setMjpegMode(true);
-                                    setStatus("connected");
-                                }
+                                console.log(`[Camera] Pi daemon waiting (attempt ${attempt}/${MAX_DAEMON_RETRIES})...`);
+                                if (isActive) { setMjpegMode(true); setStatus("connected"); }
                                 return;
                             }
                         }
                     } catch {
-                        // Connection refused or timeout
                         if (!daemonExists && attempt >= INITIAL_GRACE_RETRIES) {
-                            // No daemon found after grace period → probably a laptop
                             console.log(`[Camera] No Pi daemon after ${attempt} attempts — using WebRTC`);
                             break;
                         }
@@ -191,7 +193,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                     }
                 }
 
-                // If daemon was ever seen, use MJPEG mode regardless
                 if (daemonExists && isActive) {
                     console.log("[Camera] Pi daemon exists — activating MJPEG mode");
                     setMjpegMode(true);
@@ -199,11 +200,10 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                     return;
                 }
 
-                // Step 2: Fall back to WebRTC (dev laptop with webcam)
+                // WebRTC fallback
                 console.log("[Camera] Trying WebRTC fallback...");
                 try {
                     if (!navigator.mediaDevices?.getUserMedia) {
-                        console.log("[Camera] getUserMedia not available");
                         if (isActive) setStatus("fallback");
                         return;
                     }
@@ -212,7 +212,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                             deviceId: deviceId ? { exact: deviceId } : undefined,
                             width: { ideal: 1920 },
                             height: { ideal: 1080 },
-                            aspectRatio: { ideal: 1.7777777778 } // 16:9
+                            aspectRatio: { ideal: 1.7777777778 }
                         }
                     };
                     stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -230,23 +230,65 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
 
             return () => {
                 isActive = false;
-                if (stream) {
-                    stream.getTracks().forEach(track => track.stop());
-                }
+                if (stream) stream.getTracks().forEach(t => t.stop());
             };
         }, [deviceId, resolution]);
 
         // ═══════════════════════════════════════
+        //  DAEMON STATUS POLLING — FPS + Resolution feed
+        //
+        //  NEW in v2: reads fps, frames, dropped, resolution from /status
+        //  and forwards them to onFpsUpdate / onResolutionChange props.
+        //  Polls every 2 seconds while in MJPEG mode.
+        // ═══════════════════════════════════════
+        useEffect(() => {
+            if (!mjpegMode) return;
+
+            const hostname = window.location.hostname || 'localhost';
+            let timer: ReturnType<typeof setInterval>;
+
+            const poll = async () => {
+                try {
+                    const res = await fetch(`http://${hostname}:5555/status`, {
+                        signal: AbortSignal.timeout(1500)
+                    });
+                    if (!res.ok) return;
+                    const data = await res.json();
+
+                    // Forward FPS to parent
+                    if (typeof data.fps === 'number') {
+                        onFpsUpdate?.(data.fps);
+                    }
+
+                    // Forward resolution to parent (parse "1920x1080" → [1920, 1080])
+                    if (typeof data.resolution === 'string') {
+                        const parts = data.resolution.split('x').map(Number);
+                        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+                            onResolutionChange?.(parts[0], parts[1]);
+                        }
+                    }
+
+                    // Log ghost frame drop count in dev
+                    if (process.env.NODE_ENV === 'development' && data.dropped > 0) {
+                        console.debug(`[Camera] Daemon ghost frames filtered: ${data.dropped}`);
+                    }
+                } catch {
+                    // Status poll failure is non-fatal — stream continues
+                }
+            };
+
+            poll(); // Immediate first poll
+            timer = setInterval(poll, 2000);
+
+            return () => clearInterval(timer);
+        }, [mjpegMode, onFpsUpdate, onResolutionChange]);
+
+        // ═══════════════════════════════════════
         //  Canvas MJPEG renderer — vsync-synced, NO tearing
         //
-        //  WHY: The native <img src="/stream"> approach updates the display
-        //  asynchronously — mid-refresh — causing the "glassy vertical lines"
-        //  (partial old frame + partial new frame visible simultaneously).
-        //
-        //  FIX: We fetch the MJPEG stream via ReadableStream, parse out
-        //  complete JPEG frames, decode them with createImageBitmap(), then
-        //  draw on a Canvas inside requestAnimationFrame() which is synced
-        //  to the display's vsync.  Frame swap ONLY happens on vsync boundaries.
+        //  v2 changes:
+        //    - Ghost frame guard: skip JPEG blobs below MIN_CLIENT_FRAME_BYTES
+        //    - Exponential backoff on reconnect (1s→2s→4s→8s, resets on frame)
         // ═══════════════════════════════════════
         useEffect(() => {
             if (!mjpegMode) return;
@@ -260,11 +302,12 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
 
             let active = true;
             let rafId = 0;
+            let retryDelay = 1000; // Exponential backoff for stream reconnect
+            let firstFrame = true;
 
-            // The latest fully-decoded ImageBitmap, ready to paint
             let pendingBitmap: ImageBitmap | null = null;
 
-            // RAF loop — draws the latest bitmap, synced to vsync
+            // RAF loop — vsync-synced frame paint
             const paint = () => {
                 if (!active) return;
                 rafId = requestAnimationFrame(paint);
@@ -272,7 +315,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 const bm = pendingBitmap;
                 pendingBitmap = null;
 
-                // Resize canvas to match bitmap (only when resolution changes)
                 if (canvas.width !== bm.width || canvas.height !== bm.height) {
                     canvas.width = bm.width;
                     canvas.height = bm.height;
@@ -282,8 +324,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             };
             rafId = requestAnimationFrame(paint);
 
-            // MJPEG multipart stream parser
-            // Protocol: "--frame\r\nContent-Type: image/jpeg\r\n\r\n{JPEG}\r\n"
             async function readStream() {
                 const SOI = [0xFF, 0xD8];
                 const EOI = [0xFF, 0xD9];
@@ -292,12 +332,14 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 try {
                     res = await fetch(streamUrl);
                 } catch {
-                    if (active) setTimeout(readStream, 2000);
+                    if (active) setTimeout(readStream, retryDelay);
+                    retryDelay = Math.min(retryDelay * 2, 8000);
                     return;
                 }
 
                 if (!res.ok || !res.body) {
-                    if (active) setTimeout(readStream, 2000);
+                    if (active) setTimeout(readStream, retryDelay);
+                    retryDelay = Math.min(retryDelay * 2, 8000);
                     return;
                 }
 
@@ -327,33 +369,46 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         if (done || !active) break;
                         if (value) append(value);
 
-                        // Extract every complete JPEG frame
                         while (true) {
                             const start = indexOf(buf, SOI, 0);
                             if (start === -1) { buf = new Uint8Array(0); break; }
                             if (start > 0) { buf = buf.slice(start); }
 
                             const end = indexOf(buf, EOI, 2);
-                            if (end === -1) break;  // incomplete — wait for more data
+                            if (end === -1) break;
 
                             const jpeg = buf.slice(0, end + 2);
                             buf = buf.slice(end + 2);
 
-                            // Decode asynchronously — doesn't block the read loop
+                            // ── CLIENT-SIDE GHOST FRAME GUARD (new in v2) ────────
+                            // Secondary defence matching daemon's MIN_FRAME_BYTES.
+                            // Skips tiny spurious frames without a GPU decode attempt.
+                            if (jpeg.length < MIN_CLIENT_FRAME_BYTES) {
+                                console.debug(`[Camera] Client filtered ghost frame (${jpeg.length} bytes)`);
+                                continue;
+                            }
+
                             const blob = new Blob([jpeg], { type: 'image/jpeg' });
                             createImageBitmap(blob).then(bm => {
                                 if (!active) { bm.close(); return; }
-                                // Discard a pending bitmap that hasn't been painted yet
                                 if (pendingBitmap) pendingBitmap.close();
                                 pendingBitmap = bm;
+
                                 if (!mjpegHasFrame) {
                                     setMjpegHasFrame(true);
                                     setStatus('connected');
                                 }
+
+                                // Reset backoff on first successful frame
+                                if (firstFrame) {
+                                    firstFrame = false;
+                                    retryDelay = 1000;
+                                    console.log('[Camera] First frame painted — stream live ✓');
+                                }
                             }).catch(() => { });
                         }
 
-                        // Guard buffer size (10 MB)
+                        // Buffer size guard (10 MB)
                         if (buf.length > 10 * 1024 * 1024) {
                             buf = buf.slice(buf.length - 1024 * 1024);
                         }
@@ -363,8 +418,9 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 } finally {
                     reader.releaseLock();
                     if (active) {
-                        console.warn('[Camera] Stream disconnected — reconnecting in 2s');
-                        setTimeout(readStream, 2000);
+                        console.warn(`[Camera] Stream disconnected — reconnecting in ${retryDelay}ms`);
+                        setTimeout(readStream, retryDelay);
+                        retryDelay = Math.min(retryDelay * 2, 8000);
                     }
                 }
             }
@@ -380,17 +436,15 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [mjpegMode]);
 
-
-
         // ═══════════════════════════════════════
-        //  ARROW KEY CONTROLS — Sub-pixel calibration Accuracy
+        //  ARROW KEY CONTROLS — Sub-pixel calibration accuracy
         // ═══════════════════════════════════════
         useEffect(() => {
             if (!isCalibrating || !captureArea) return;
 
             const handleKeyDown = (e: KeyboardEvent) => {
                 const step = e.shiftKey ? 0.01 : 0.002;
-                let dx = 0; let dy = 0;
+                let dx = 0, dy = 0;
 
                 if (e.key === 'ArrowLeft') dx = -step;
                 else if (e.key === 'ArrowRight') dx = step;
@@ -411,20 +465,10 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             return () => window.removeEventListener('keydown', handleKeyDown);
         }, [isCalibrating, captureArea, onCalibrationChange]);
 
-
-        // FRAME SCALE — Medical Scope Approach
-        //
-        // The entire scope frame SCALES LARGER on screen.
-        // Container: absolute positioned, centered via translate(-50%,-50%)
-        // then scale(zoom) applied. The frame GROWS beyond the viewport.
-        // Parent: overflow:hidden clips the edges symmetrically.
-        // Result: zero pixelation, frame grows outward, content stays sharp.
-
         // ═══════════════════════════════════════
-        //  Container Style — Memoized for zero layout thrashing
+        //  Container Style — Memoized
         // ═══════════════════════════════════════
         const containerStyle = useMemo((): React.CSSProperties => {
-            // Guarantee 16:9 exact ratio mapping inside the wrapper
             let cw = wrapperSize.w;
             let ch = cw * 9 / 16;
 
@@ -435,13 +479,10 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
 
             const isCircleScope = activeShape === 'circle' && !isCalibrating && captureArea && captureArea.width > 0;
 
-            // For circle scope: expand container to use full wrapper height as circle diameter.
-            // Container stays 16:9 (video fills without letterboxing), circle clips the edges.
-            // The circle diameter = min(wrapper width, wrapper height) = biggest circle fitting the canvas.
             if (isCircleScope) {
                 const circleDiameter = Math.min(wrapperSize.w, wrapperSize.h);
                 ch = circleDiameter;
-                cw = circleDiameter * 16 / 9; // 16:9 container at full height — may overflow width, circle clips it
+                cw = circleDiameter * 16 / 9;
             }
 
             const base: React.CSSProperties = {
@@ -456,17 +497,12 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             const effectiveZoom = hardwareZoom ? 1 : zoom;
             const transformParts: string[] = ["translate(-50%, -50%)"];
 
-            if (panOffset.x !== 0 || panOffset.y !== 0) {
+            if (panOffset.x !== 0 || panOffset.y !== 0)
                 transformParts.push(`translate(${panOffset.x}px, ${panOffset.y}px)`);
-            }
-
-            if (effectiveZoom > 1) {
+            if (effectiveZoom > 1)
                 transformParts.push(`scale(${effectiveZoom})`);
-            }
-
-            if (scopeScale !== 1) {
+            if (scopeScale !== 1)
                 transformParts.push(`scale(${scopeScale})`);
-            }
 
             return {
                 ...base,
@@ -480,7 +516,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [wrapperSize.w, wrapperSize.h, hardwareZoom, zoom, panOffset.x, panOffset.y, scopeScale, activeShape, isCalibrating, captureArea]);
 
         // ═══════════════════════════════════════
-        //  Video Internal Style — Proper Scoping/Centering logic
+        //  Video Inner Style
         // ═══════════════════════════════════════
         const videoInnerStyle = useMemo((): React.CSSProperties => {
             const base: React.CSSProperties = {
@@ -497,23 +533,14 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 return { ...base, transform: "translate(-50%, -50%)" };
             }
 
-            // Zoom the internal box purely via transform to maintain native object ratios implicitly
             const intrinsicScale = 1 / captureArea.width;
             const intrinsicShiftX = (0.5 - captureArea.x) * 100;
             const intrinsicShiftY = (0.5 - captureArea.y) * 100;
 
-            // Aspect Ratio Correction: 
-            // - '4:3 (Stretch Thin)': If content looks too thin (1.333x)
-            // - '4:3 (Squeeze Wide)': If content looks too wide (0.75x)
-            // - '1:1': Force square (0.5625x)
             let correctionScaleX = 1;
-            if (aspectRatioCorrection === '4:3 (Stretch Thin)') {
-                correctionScaleX = 1.333; // (16/9) / (4/3) - Stretches thin feed back to wide
-            } else if (aspectRatioCorrection === '4:3 (Squeeze Wide)') {
-                correctionScaleX = 0.75; // Squeezes fat feed
-            } else if (aspectRatioCorrection === '1:1') {
-                correctionScaleX = 0.5625; // (1/1) / (16/9)
-            }
+            if (aspectRatioCorrection === '4:3 (Stretch Thin)') correctionScaleX = 1.333;
+            else if (aspectRatioCorrection === '4:3 (Squeeze Wide)') correctionScaleX = 0.75;
+            else if (aspectRatioCorrection === '1:1') correctionScaleX = 0.5625;
 
             return {
                 ...base,
@@ -522,78 +549,50 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [isCalibrating, captureArea, aspectRatioCorrection]);
 
         // ═══════════════════════════════════════
-        //  Calibration Mouse Handlers (Draw / Move / Resize)
+        //  Calibration Mouse Handlers
         // ═══════════════════════════════════════
-        // Helper: Get actual rendered video dimensions
-        // With our precise 16:9 container, this maps 1:1 perfectly covering the area.
         const getVideoMetrics = () => {
             if (!containerRef.current) return null;
             const containerRect = containerRef.current.getBoundingClientRect();
-
-            return {
-                left: 0,
-                top: 0,
-                width: containerRect.width,
-                height: containerRect.height,
-                containerRect
-            };
+            return { left: 0, top: 0, width: containerRect.width, height: containerRect.height, containerRect };
         };
 
         const getNormCoords = (e: React.MouseEvent): { x: number; y: number } => {
             const metrics = getVideoMetrics();
             if (!metrics) return { x: 0, y: 0 };
-
             const { width, height, containerRect } = metrics;
-
-            // e.clientX/Y are relative to the viewport.
-            // containerRect.left/top are the container's position in the viewport.
-            // So mouse inside container exactly = e.clientX - containerRect.left
-            const mouseX = e.clientX - containerRect.left;
-            const mouseY = e.clientY - containerRect.top;
-
-            // Since we know the video exactly fills this container (left=0, top=0 internally inside the container bounds)
             return {
-                x: Math.max(0, Math.min(1, mouseX / width)),
-                y: Math.max(0, Math.min(1, mouseY / height)),
+                x: Math.max(0, Math.min(1, (e.clientX - containerRect.left) / width)),
+                y: Math.max(0, Math.min(1, (e.clientY - containerRect.top) / height)),
             };
         };
 
         const getContainerCoords = (e: React.MouseEvent): { x: number; y: number } => {
             if (!containerRef.current) return { x: 0, y: 0 };
             const rect = containerRef.current.getBoundingClientRect();
-            return {
-                x: e.clientX - rect.left,
-                y: e.clientY - rect.top
-            };
+            return { x: e.clientX - rect.left, y: e.clientY - rect.top };
         };
 
         const getHitZone = (e: React.MouseEvent): DragMode => {
             if (!captureArea || captureArea.width <= 0) return 'draw';
             const { x, y } = getNormCoords(e);
             const area = captureArea;
-            const handleSize = 0.025; // 2.5% of container for handle hit detection
+            const handleSize = 0.025;
 
             const left = area.x - area.width / 2;
             const right = area.x + area.width / 2;
             const top = area.y - area.height / 2;
             const bottom = area.y + area.height / 2;
 
-            // Check corners first
             if (Math.abs(x - left) < handleSize && Math.abs(y - top) < handleSize) return 'resize-nw';
             if (Math.abs(x - right) < handleSize && Math.abs(y - top) < handleSize) return 'resize-ne';
             if (Math.abs(x - left) < handleSize && Math.abs(y - bottom) < handleSize) return 'resize-sw';
             if (Math.abs(x - right) < handleSize && Math.abs(y - bottom) < handleSize) return 'resize-se';
-
-            // Check edges
             if (Math.abs(x - left) < handleSize && y > top && y < bottom) return 'resize-w';
             if (Math.abs(x - right) < handleSize && y > top && y < bottom) return 'resize-e';
             if (Math.abs(y - top) < handleSize && x > left && x < right) return 'resize-n';
             if (Math.abs(y - bottom) < handleSize && x > left && x < right) return 'resize-s';
-
-            // Check inside for move
             if (x > left && x < right && y > top && y < bottom) return 'move';
-
-            // Outside — draw new
             return 'draw';
         };
 
@@ -619,16 +618,11 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 setDragMode(mode);
                 setDragStart(coords);
                 setDragStartArea(captureArea ? { ...captureArea } : null);
-
-                if (mode === 'draw') {
-                    onCalibrationChange?.({ x: coords.x, y: coords.y, width: 0, height: 0 });
-                }
+                if (mode === 'draw') onCalibrationChange?.({ x: coords.x, y: coords.y, width: 0, height: 0 });
             } else if (zoom > 1) {
-                // Pan mode
                 e.preventDefault();
-                const coords = getContainerCoords(e);
                 setDragMode('pan');
-                setDragStart(coords);
+                setDragStart(getContainerCoords(e));
                 setDragStartPan({ ...panOffset });
             }
         };
@@ -636,7 +630,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         const handleMouseMove = (e: React.MouseEvent) => {
             if (!containerRef.current) return;
 
-            // Update cursor based on hover zone
             if (dragMode === 'none') {
                 const zone = isCalibrating ? getHitZone(e) : (zoom > 1 ? 'move' : 'none');
                 containerRef.current.style.cursor = getCursorForMode(zone as DragMode);
@@ -650,24 +643,16 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 const curr = getContainerCoords(e);
                 const dx = curr.x - dragStart.x;
                 const dy = curr.y - dragStart.y;
-
-                // Calculate unclamped pan
                 let newX = dragStartPan.x + dx;
                 let newY = dragStartPan.y + dy;
 
-                // Clamp: at zoom Z, the video is Z× bigger than the container.
-                // We pan BEFORE scaling, so we clamp based on the overflow distance.
-                // Max pan = containerSize * (Z - 1) / 2
                 if (zoom > 1 && containerRef.current) {
                     const rect = containerRef.current.getBoundingClientRect();
                     const maxPanX = (rect.width * (zoom - 1)) / 2;
                     const maxPanY = (rect.height * (zoom - 1)) / 2;
                     newX = Math.max(-maxPanX, Math.min(maxPanX, newX));
                     newY = Math.max(-maxPanY, Math.min(maxPanY, newY));
-                } else {
-                    newX = 0;
-                    newY = 0;
-                }
+                } else { newX = 0; newY = 0; }
 
                 setPanOffset({ x: newX, y: newY });
                 return;
@@ -680,56 +665,37 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             const dy = curr.y - dragStart.y;
 
             if (dragMode === 'draw') {
-                // Draw from center outward
                 const distX = Math.abs(dx);
                 const distY = Math.abs(dy);
 
                 if (activeShape === 'circle') {
-                    // Circle: enforce equal width and height (perfect circle)
                     const dist = Math.max(distX, distY);
                     const size = Math.min(dist * 2, 1);
-                    onCalibrationChange({
-                        x: dragStart.x,
-                        y: dragStart.y,
-                        width: size,
-                        height: size,
-                    });
+                    onCalibrationChange({ x: dragStart.x, y: dragStart.y, width: size, height: size });
                 } else {
-                    // Rectangle: independent w/h
                     onCalibrationChange({
-                        x: dragStart.x,
-                        y: dragStart.y,
+                        x: dragStart.x, y: dragStart.y,
                         width: Math.min(distX * 2, 1),
                         height: Math.min(distY * 2, 1),
                     });
                 }
             } else if (dragMode === 'move' && dragStartArea) {
-                // Move the shape
                 const newX = Math.max(dragStartArea.width / 2, Math.min(1 - dragStartArea.width / 2, dragStartArea.x + dx));
                 const newY = Math.max(dragStartArea.height / 2, Math.min(1 - dragStartArea.height / 2, dragStartArea.y + dy));
-                onCalibrationChange({
-                    x: newX,
-                    y: newY,
-                    width: dragStartArea.width,
-                    height: dragStartArea.height,
-                });
-            } else if (dragMode.startsWith('resize') && dragStartArea) {
-                // Resize from the appropriate edge/corner
+                onCalibrationChange({ x: newX, y: newY, width: dragStartArea.width, height: dragStartArea.height });
 
+            } else if (dragMode.startsWith('resize') && dragStartArea) {
                 let finalW = dragStartArea.width;
                 let finalH = dragStartArea.height;
                 let finalX = dragStartArea.x;
                 let finalY = dragStartArea.y;
 
                 if (activeShape === 'circle') {
-                    // Circle: uniform resize — use the dominant axis delta
                     const absDx = Math.abs(dx);
                     const absDy = Math.abs(dy);
-                    // Determine sign based on which direction is growing outward
                     let delta = 0;
-                    if (dragMode.includes('e') || dragMode.includes('s') || dragMode === 'resize-se' || dragMode === 'resize-ne' || dragMode === 'resize-sw') {
+                    if (dragMode.includes('e') || dragMode.includes('s')) {
                         delta = Math.max(absDx, absDy);
-                        // If the dominant move is shrinking (moving toward center), negate
                         if (dragMode.includes('e') && dx < 0) delta = -delta;
                         else if (dragMode.includes('w') && dx > 0) delta = -delta;
                         else if (dragMode.includes('s') && dy < 0) delta = -delta;
@@ -740,39 +706,18 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         else if (dragMode.includes('n') && dy > 0) delta = -delta;
                     }
                     const newSize = Math.max(0.02, Math.min(1, dragStartArea.width + delta));
-                    finalW = newSize;
-                    finalH = newSize;
-                    finalX = dragStartArea.x;
-                    finalY = dragStartArea.y;
+                    finalW = newSize; finalH = newSize;
+                    finalX = dragStartArea.x; finalY = dragStartArea.y;
                 } else {
-                    // Rectangle: one-sided resize logic
-                    if (dragMode.includes('e')) {
-                        finalW = Math.max(0.01, dragStartArea.width + dx);
-                        finalX = dragStartArea.x + (finalW - dragStartArea.width) / 2;
-                    } else if (dragMode.includes('w')) {
-                        finalW = Math.max(0.01, dragStartArea.width - dx);
-                        finalX = dragStartArea.x - (finalW - dragStartArea.width) / 2;
-                    }
-
-                    if (dragMode.includes('s')) {
-                        finalH = Math.max(0.01, dragStartArea.height + dy);
-                        finalY = dragStartArea.y + (finalH - dragStartArea.height) / 2;
-                    } else if (dragMode.includes('n')) {
-                        finalH = Math.max(0.01, dragStartArea.height - dy);
-                        finalY = dragStartArea.y - (finalH - dragStartArea.height) / 2;
-                    }
+                    if (dragMode.includes('e')) { finalW = Math.max(0.01, dragStartArea.width + dx); finalX = dragStartArea.x + (finalW - dragStartArea.width) / 2; }
+                    else if (dragMode.includes('w')) { finalW = Math.max(0.01, dragStartArea.width - dx); finalX = dragStartArea.x - (finalW - dragStartArea.width) / 2; }
+                    if (dragMode.includes('s')) { finalH = Math.max(0.01, dragStartArea.height + dy); finalY = dragStartArea.y + (finalH - dragStartArea.height) / 2; }
+                    else if (dragMode.includes('n')) { finalH = Math.max(0.01, dragStartArea.height - dy); finalY = dragStartArea.y - (finalH - dragStartArea.height) / 2; }
                 }
 
-                // Final Bounds Check
                 finalX = Math.max(finalW / 2, Math.min(1 - finalW / 2, finalX));
                 finalY = Math.max(finalH / 2, Math.min(1 - finalH / 2, finalY));
-
-                onCalibrationChange({
-                    x: finalX,
-                    y: finalY,
-                    width: finalW,
-                    height: finalH,
-                });
+                onCalibrationChange({ x: finalX, y: finalY, width: finalW, height: finalH });
             }
         };
 
@@ -783,7 +728,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             setDragStartPan(null);
         };
 
-        // Clamp pan when zoom changes (including reset to 0 at zoom=1)
+        // Pan clamp on zoom change
         useEffect(() => {
             if (zoom <= 1) {
                 setPanOffset({ x: 0, y: 0 });
@@ -799,62 +744,40 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             }
         }, [zoom, hardwareZoom]);
 
-        // ═══════════════════════════════════════
-        //  3. Hardware PTZ Sync (Pi 5)
-        // ═══════════════════════════════════════
+        // Hardware PTZ Sync
         useEffect(() => {
             if (hardwareZoom) {
                 const hostname = window.location.hostname || 'localhost';
-                // Send panOffset inversely mapped as tilt/pan if needed, depending on v4l2
                 fetch(`http://${hostname}:5555/ptz?zoom=${zoom}&pan=${panOffset.x}&tilt=${panOffset.y}`)
                     .catch(() => { });
             }
         }, [hardwareZoom, zoom, panOffset]);
 
         // ═══════════════════════════════════════
-        //  4. Capture Logic (Zero-Latency Daemon API & Fallback)
+        //  Capture Logic
         // ═══════════════════════════════════════
-
-        // Helper: apply shape mask and aspect ratio correction to canvas context
-        // Returns a NEW canvas that is tightly cropped to the mask.
         const cropAndMask = (sourceCanvas: HTMLCanvasElement, w: number, h: number): HTMLCanvasElement => {
             if (!captureArea || captureArea.width === 0) return sourceCanvas;
 
-            // Use the passed activeShape prop
             const shape = activeShape;
-
-            // 1. Aspect Ratio Correction for Captured Image
             let correctionScaleX = 1;
-            if (aspectRatioCorrection === '4:3 (Stretch Thin)') {
-                correctionScaleX = 1.333; // Stretch
-            } else if (aspectRatioCorrection === '4:3 (Squeeze Wide)') {
-                correctionScaleX = 0.75; // Squeeze
-            } else if (aspectRatioCorrection === '1:1') {
-                correctionScaleX = 0.5625; // Squeeze
-            }
+            if (aspectRatioCorrection === '4:3 (Stretch Thin)') correctionScaleX = 1.333;
+            else if (aspectRatioCorrection === '4:3 (Squeeze Wide)') correctionScaleX = 0.75;
+            else if (aspectRatioCorrection === '1:1') correctionScaleX = 0.5625;
 
-            // The capture area is normalized (0 to 1). We map it back to canvas pixels.
             const cx = captureArea.x * w;
             const cy = captureArea.y * h;
             const cw = captureArea.width * w;
             const ch = captureArea.height * h;
 
-            // 2. Create the perfectly cropped destination canvas
             const resultCanvas = document.createElement("canvas");
             resultCanvas.width = cw;
             resultCanvas.height = ch;
             const ctx = resultCanvas.getContext("2d");
-
             if (!ctx) return sourceCanvas;
 
-            // 3. Draw the exact bounding box from the source image into the result canvas
-            ctx.drawImage(
-                sourceCanvas,
-                cx - cw / 2, cy - ch / 2, cw, ch, // Source coordinates (x, y, width, height)
-                0, 0, cw, ch                      // Destination coordinates (x, y, width, height)
-            );
+            ctx.drawImage(sourceCanvas, cx - cw / 2, cy - ch / 2, cw, ch, 0, 0, cw, ch);
 
-            // 4. Apply a circular clip to mask out the corners if shape is circle
             if (shape === 'circle') {
                 ctx.globalCompositeOperation = 'destination-in';
                 ctx.beginPath();
@@ -869,7 +792,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         const doCapture = useCallback(async () => {
             let imgDataUrl: string | null = null;
 
-            // A: Local Dev WebRTC Fallback
             if (status === "streaming" && videoRef.current) {
                 const canvas = document.createElement("canvas");
                 canvas.width = videoRef.current.videoWidth || 1920;
@@ -877,11 +799,9 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 const ctx = canvas.getContext("2d");
                 if (ctx) {
                     ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-                    const finalCanvas = cropAndMask(canvas, canvas.width, canvas.height);
-                    imgDataUrl = finalCanvas.toDataURL("image/png", 1.0); // Use 1.0 for PNG, or switch to image/jpeg for smaller payload
+                    imgDataUrl = cropAndMask(canvas, canvas.width, canvas.height).toDataURL("image/png", 1.0);
                 }
             } else {
-                // B: Hardware Mode (Pi 5) — hit the background node.js tcp scraper daemon
                 try {
                     const hostname = window.location.hostname || 'localhost';
                     const res = await fetch(`http://${hostname}:5555/capture`, { method: "GET" });
@@ -889,7 +809,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         const blob = await res.blob();
                         const blobUrl = URL.createObjectURL(blob);
 
-                        // Wait for image to load to apply mask
                         imgDataUrl = await new Promise<string | null>((resolve, reject) => {
                             const img = new Image();
                             img.onload = () => {
@@ -898,49 +817,35 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                                 canvas.height = img.naturalHeight;
                                 const ctx = canvas.getContext("2d");
                                 if (ctx) {
-                                    // Apply aspect ratio correction before drawing the image
                                     let correctionScaleX = 1;
-                                    if (aspectRatioCorrection === '4:3 (Stretch Thin)') {
-                                        correctionScaleX = 1.333;
-                                    } else if (aspectRatioCorrection === '4:3 (Squeeze Wide)') {
-                                        correctionScaleX = 0.75;
-                                    } else if (aspectRatioCorrection === '1:1') {
-                                        correctionScaleX = 0.5625;
-                                    }
+                                    if (aspectRatioCorrection === '4:3 (Stretch Thin)') correctionScaleX = 1.333;
+                                    else if (aspectRatioCorrection === '4:3 (Squeeze Wide)') correctionScaleX = 0.75;
+                                    else if (aspectRatioCorrection === '1:1') correctionScaleX = 0.5625;
 
                                     if (correctionScaleX !== 1) {
-                                        // We stretch the canvas width or the drawImage width
-                                        // To keep it simple, we draw the image with a stretched width on the canvas
                                         ctx.drawImage(img, 0, 0, img.naturalWidth * correctionScaleX, img.naturalHeight);
                                     } else {
                                         ctx.drawImage(img, 0, 0);
                                     }
-
-                                    const finalCanvas = cropAndMask(canvas, canvas.width * correctionScaleX, canvas.height);
-                                    // Use PNG compression 1.0 or switch to jpeg for medical
-                                    resolve(finalCanvas.toDataURL("image/png", 1.0));
+                                    resolve(cropAndMask(canvas, canvas.width * correctionScaleX, canvas.height).toDataURL("image/png", 1.0));
                                 } else {
                                     resolve(null);
                                 }
                                 URL.revokeObjectURL(blobUrl);
                             };
-                            img.onerror = () => {
-                                URL.revokeObjectURL(blobUrl);
-                                reject(new Error("Failed to load daemon blob into image"));
-                            };
+                            img.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error("Failed to load capture blob")); };
                             img.src = blobUrl;
                         });
                     }
                 } catch (err) {
-                    console.error("GStreamer hardware daemon capture failed:", err);
+                    console.error("Hardware daemon capture failed:", err);
                 }
             }
 
             return imgDataUrl;
-        }, [status, captureArea]);
+        }, [status, captureArea, aspectRatioCorrection, activeShape]);
 
         const startRecording = useCallback(async () => {
-            // Hardware Mode (Pi 5) 
             try {
                 const hostname = window.location.hostname || 'localhost';
                 const res = await fetch(`http://${hostname}:5555/record/start`, { method: "GET" }).catch(() => null);
@@ -949,17 +854,12 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 console.log("Daemon record start failed, trying fallback...", err);
             }
 
-            // Local Dev WebRTC Fallback
             if (status === "streaming" && videoRef.current && (videoRef.current.srcObject instanceof MediaStream)) {
                 try {
                     const stream = videoRef.current.srcObject;
                     const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
                     recordedChunksRef.current = [];
-
-                    recorder.ondataavailable = (e) => {
-                        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-                    };
-
+                    recorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
                     recorder.start(200);
                     mediaRecorderRef.current = recorder;
                     return true;
@@ -971,7 +871,6 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [status]);
 
         const stopRecording = useCallback(async () => {
-            // Hardware Mode (Pi 5)
             try {
                 const hostname = window.location.hostname || 'localhost';
                 const res = await fetch(`http://${hostname}:5555/record/stop`, { method: "GET" }).catch(() => null);
@@ -979,18 +878,14 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                     const data = await res.json();
                     return data.filename;
                 }
-            } catch (err) {
-                console.log("Daemon record stop failed, checking fallback...");
-            }
+            } catch { /* fallback */ }
 
-            // Local Dev WebRTC Fallback
             if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
                 return new Promise<string | null>((resolve) => {
                     const recorder = mediaRecorderRef.current!;
                     recorder.onstop = () => {
                         const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
                         recordedChunksRef.current = [];
-                        // Save locally to blob URL for dev
                         resolve(URL.createObjectURL(blob));
                     };
                     recorder.stop();
@@ -1010,7 +905,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }));
 
         // ═══════════════════════════════════════
-        //  Calibration Overlay Renderer
+        //  Calibration Overlay
         // ═══════════════════════════════════════
         const renderCalibrationOverlay = () => {
             if (!isCalibrating) return null;
@@ -1020,209 +915,111 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             const metrics = getVideoMetrics();
             if (!metrics) return null;
 
-            const { left, top, width, height, containerRect } = metrics;
+            const { containerRect } = metrics;
             if (!containerRect || containerRect.width <= 0 || containerRect.height <= 0) return null;
 
-            // The container maps exactly 1:1 to the normalized coordinates.
-            // A normalized value of 0.5 means exactly 50% of the container.
             const wPct = hasArea ? (area!.width * 100) : 0;
             const hPct = hasArea ? (area!.height * 100) : 0;
-
             const cxPct = hasArea ? (area!.x * 100) : 0;
             const cyPct = hasArea ? (area!.y * 100) : 0;
-
             const leftPct = hasArea ? (cxPct - wPct / 2) : 0;
             const topPct = hasArea ? (cyPct - hPct / 2) : 0;
-
             const cxPx = hasArea ? (area!.x * containerRect.width) : 0;
             const cyPx = hasArea ? (area!.y * containerRect.height) : 0;
             const wPx = hasArea ? (area!.width * containerRect.width) : 0;
             const hPx = hasArea ? (area!.height * containerRect.height) : 0;
-
-            let circleRadius = Math.min(wPx, hPx) / 2;
+            const circleRadius = Math.min(wPx, hPx) / 2;
 
             if (isNaN(cxPx) || isNaN(cyPx) || isNaN(circleRadius)) return null;
 
             return (
                 <div className="absolute inset-0 pointer-events-none z-[100]">
-                    {/* Header Badge */}
                     <div className="absolute top-4 left-4 flex items-center gap-3 px-4 py-2.5 bg-indigo-600/90 rounded-2xl shadow-2xl border border-indigo-400/30 backdrop-blur-sm pointer-events-auto z-10">
                         <Maximize2 size={14} className="text-white animate-pulse" />
-                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white">
-                            Scope Calibration
-                        </span>
+                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-white">Scope Calibration</span>
                         <div className="w-px h-4 bg-white/20" />
                         <span className="text-[10px] font-bold text-indigo-200 capitalize">Area</span>
                     </div>
 
-                    {/* Instructions / Ghost Outline when no area drawn yet */}
                     {!hasArea && dragMode === 'none' && (
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                             <div className="absolute inset-0 flex items-center justify-center opacity-30">
                                 <div className="w-[100%] h-[100%] border-2 border-dashed border-white/50" />
                             </div>
-
                             <div className="px-6 py-4 bg-black/60 backdrop-blur-md rounded-3xl border border-white/10 text-center animate-in fade-in zoom-in duration-300 z-10">
                                 <div className="w-12 h-12 rounded-2xl bg-white/10 flex items-center justify-center mx-auto mb-3">
                                     <MousePointer2 size={20} className="text-white opacity-80" />
                                 </div>
                                 <p className="text-[10px] font-black uppercase tracking-widest text-white mb-1">Click & Drag to Draw</p>
-                                <p className="text-[9px] text-white/50">
-                                    Draw your rectangular area
-                                </p>
+                                <p className="text-[9px] text-white/50">Draw your rectangular area</p>
                             </div>
                         </div>
                     )}
 
-                    {/* MASK Overlay */}
                     {hasArea && (
                         <svg width="100%" height="100%" className="absolute inset-0 pointer-events-none">
                             <defs>
                                 <mask id="calibration-mask">
                                     <rect width="100%" height="100%" fill="white" />
                                     {activeShape === 'circle' ? (
-                                        <circle
-                                            cx={`${cxPct}%`}
-                                            cy={`${cyPct}%`}
-                                            r={`${Math.min(wPct, hPct) / 2}%`}
-                                            fill="black"
-                                        />
+                                        <circle cx={`${cxPct}%`} cy={`${cyPct}%`} r={`${Math.min(wPct, hPct) / 2}%`} fill="black" />
                                     ) : (
-                                        <rect
-                                            x={`${leftPct}%`}
-                                            y={`${topPct}%`}
-                                            width={`${wPct}%`}
-                                            height={`${hPct}%`}
-                                            fill="black"
-                                        />
+                                        <rect x={`${leftPct}%`} y={`${topPct}%`} width={`${wPct}%`} height={`${hPct}%`} fill="black" />
                                     )}
                                 </mask>
                             </defs>
                             <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" mask="url(#calibration-mask)" />
-
-                            {/* Shape Outline */}
                             {activeShape === 'circle' ? (
-                                <circle
-                                    cx={`${cxPct}%`}
-                                    cy={`${cyPct}%`}
-                                    r={`${Math.min(wPct, hPct) / 2}%`}
-                                    fill="none"
-                                    stroke="white"
-                                    strokeWidth="2"
-                                    strokeDasharray="4 4"
-                                    className="animate-pulse-slow"
-                                />
+                                <circle cx={`${cxPct}%`} cy={`${cyPct}%`} r={`${Math.min(wPct, hPct) / 2}%`} fill="none" stroke="white" strokeWidth="2" strokeDasharray="4 4" />
                             ) : (
-                                <rect
-                                    x={`${leftPct}%`}
-                                    y={`${topPct}%`}
-                                    width={`${wPct}%`}
-                                    height={`${hPct}%`}
-                                    fill="none"
-                                    stroke="white"
-                                    strokeWidth="2"
-                                    strokeDasharray="4 4"
-                                    className="animate-pulse-slow"
-                                />
+                                <rect x={`${leftPct}%`} y={`${topPct}%`} width={`${wPct}%`} height={`${hPct}%`} fill="none" stroke="white" strokeWidth="2" strokeDasharray="4 4" />
                             )}
-
-                            {/* Grid Reference Lines — Full-span through center */}
-                            <line
-                                x1="0%" y1={`${cyPct}%`}
-                                x2="100%" y2={`${cyPct}%`}
-                                stroke="white" strokeWidth="0.5" opacity="0.15"
-                                strokeDasharray="6 4"
-                            />
-                            <line
-                                x1={`${cxPct}%`} y1="0%"
-                                x2={`${cxPct}%`} y2="100%"
-                                stroke="white" strokeWidth="0.5" opacity="0.15"
-                                strokeDasharray="6 4"
-                            />
-
-                            {/* Small Crosshair at center */}
-                            <line
-                                x1={`${cxPct - 1}%`} y1={`${cyPct}%`}
-                                x2={`${cxPct + 1}%`} y2={`${cyPct}%`}
-                                stroke="white" strokeWidth="1" opacity="0.6"
-                            />
-                            <line
-                                x1={`${cxPct}%`} y1={`${cyPct - 1.5}%`}
-                                x2={`${cxPct}%`} y2={`${cyPct + 1.5}%`}
-                                stroke="white" strokeWidth="1" opacity="0.6"
-                            />
-                            {/* Center dot */}
-                            <circle
-                                cx={`${cxPct}%`} cy={`${cyPct}%`}
-                                r="2" fill="white" opacity="0.5"
-                            />
+                            <line x1="0%" y1={`${cyPct}%`} x2="100%" y2={`${cyPct}%`} stroke="white" strokeWidth="0.5" opacity="0.15" strokeDasharray="6 4" />
+                            <line x1={`${cxPct}%`} y1="0%" x2={`${cxPct}%`} y2="100%" stroke="white" strokeWidth="0.5" opacity="0.15" strokeDasharray="6 4" />
+                            <line x1={`${cxPct - 1}%`} y1={`${cyPct}%`} x2={`${cxPct + 1}%`} y2={`${cyPct}%`} stroke="white" strokeWidth="1" opacity="0.6" />
+                            <line x1={`${cxPct}%`} y1={`${cyPct - 1.5}%`} x2={`${cxPct}%`} y2={`${cyPct + 1.5}%`} stroke="white" strokeWidth="1" opacity="0.6" />
+                            <circle cx={`${cxPct}%`} cy={`${cyPct}%`} r="2" fill="white" opacity="0.5" />
                         </svg>
                     )}
 
-                    {/* Handles & UI */}
                     {hasArea && (
                         <>
-                            {/* Center Mover — Compact */}
                             <div
                                 className="absolute w-7 h-7 -ml-3.5 -mt-3.5 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center cursor-grab active:cursor-grabbing pointer-events-auto transition-colors border border-white/30 backdrop-blur-md z-[40] group shadow-lg"
                                 style={{ left: `${cxPct}%`, top: `${cyPct}%` }}
-                                onMouseDown={(e) => {
-                                    e.stopPropagation();
-                                    setDragMode('move');
-                                    setDragStart(getNormCoords(e));
-                                    setDragStartArea({ ...captureArea! });
-                                }}
+                                onMouseDown={(e) => { e.stopPropagation(); setDragMode('move'); setDragStart(getNormCoords(e)); setDragStartArea({ ...captureArea! }); }}
                             >
                                 <div className="p-1 rounded-md bg-indigo-500/80 shadow group-hover:scale-110 transition-transform">
                                     <Move size={11} className="text-white" />
                                 </div>
                             </div>
 
-                            {/* Resize Handles - Corners */}
                             {[
                                 { l: leftPct, t: topPct, mode: 'resize-nw' as const, cursor: 'nw-resize' },
                                 { l: leftPct + wPct, t: topPct, mode: 'resize-ne' as const, cursor: 'ne-resize' },
                                 { l: leftPct, t: topPct + hPct, mode: 'resize-sw' as const, cursor: 'sw-resize' },
                                 { l: leftPct + wPct, t: topPct + hPct, mode: 'resize-se' as const, cursor: 'se-resize' }
                             ].map((h, i) => (
-                                <div
-                                    key={`corner-${i}`}
-                                    className="absolute w-6 h-6 -ml-3 -mt-3 flex items-center justify-center cursor-pointer pointer-events-auto z-30 group"
+                                <div key={`corner-${i}`} className="absolute w-6 h-6 -ml-3 -mt-3 flex items-center justify-center cursor-pointer pointer-events-auto z-30 group"
                                     style={{ left: `${h.l}%`, top: `${h.t}%`, cursor: h.cursor }}
-                                    onMouseDown={(e) => {
-                                        e.stopPropagation();
-                                        setDragMode(h.mode);
-                                        setDragStart(getNormCoords(e));
-                                        setDragStartArea({ ...captureArea! });
-                                    }}
-                                >
+                                    onMouseDown={(e) => { e.stopPropagation(); setDragMode(h.mode); setDragStart(getNormCoords(e)); setDragStartArea({ ...captureArea! }); }}>
                                     <div className="w-3 h-3 bg-white border-2 border-indigo-600 rounded-full shadow-lg group-hover:scale-125 transition-transform" />
                                 </div>
                             ))}
 
-                            {/* Resize Handles - Edges */}
                             {[
-                                { l: leftPct + wPct / 2, t: topPct, mode: 'resize-n' as const, cursor: 'ns-resize' }, // N
-                                { l: leftPct + wPct / 2, t: topPct + hPct, mode: 'resize-s' as const, cursor: 'ns-resize' }, // S
-                                { l: leftPct, t: topPct + hPct / 2, mode: 'resize-w' as const, cursor: 'ew-resize' }, // W
-                                { l: leftPct + wPct, t: topPct + hPct / 2, mode: 'resize-e' as const, cursor: 'ew-resize' } // E
+                                { l: leftPct + wPct / 2, t: topPct, mode: 'resize-n' as const, cursor: 'ns-resize' },
+                                { l: leftPct + wPct / 2, t: topPct + hPct, mode: 'resize-s' as const, cursor: 'ns-resize' },
+                                { l: leftPct, t: topPct + hPct / 2, mode: 'resize-w' as const, cursor: 'ew-resize' },
+                                { l: leftPct + wPct, t: topPct + hPct / 2, mode: 'resize-e' as const, cursor: 'ew-resize' }
                             ].map((h, i) => (
-                                <div
-                                    key={`edge-${i}`}
-                                    className="absolute w-6 h-6 -ml-3 -mt-3 flex items-center justify-center cursor-pointer pointer-events-auto z-30 group"
+                                <div key={`edge-${i}`} className="absolute w-6 h-6 -ml-3 -mt-3 flex items-center justify-center cursor-pointer pointer-events-auto z-30 group"
                                     style={{ left: `${h.l}%`, top: `${h.t}%`, cursor: h.cursor }}
-                                    onMouseDown={(e) => {
-                                        e.stopPropagation();
-                                        setDragMode(h.mode);
-                                        setDragStart(getNormCoords(e));
-                                        setDragStartArea({ ...captureArea! });
-                                    }}
-                                >
+                                    onMouseDown={(e) => { e.stopPropagation(); setDragMode(h.mode); setDragStart(getNormCoords(e)); setDragStartArea({ ...captureArea! }); }}>
                                     <div className="w-2.5 h-2.5 bg-indigo-500 border border-white/50 rounded-full shadow-lg group-hover:scale-125 transition-transform" />
                                 </div>
                             ))}
 
-                            {/* Info Badge (Bottom Right) */}
                             <div className="absolute bottom-4 right-4 flex items-center gap-4 px-4 py-2 bg-black/80 rounded-xl border border-white/10 backdrop-blur-md pointer-events-auto z-20">
                                 <div className="space-y-0.5">
                                     <span className="text-[8px] font-black text-zinc-500 uppercase tracking-widest">Size</span>
@@ -1231,9 +1028,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                                 <div className="w-px h-6 bg-white/10" />
                                 <div className="space-y-0.5">
                                     <span className="text-[8px] font-black text-zinc-500 uppercase tracking-widest">Pos</span>
-                                    <p className="text-[10px] font-mono font-bold text-zinc-400">
-                                        ({Math.round(area!.x * 100)}, {Math.round(area!.y * 100)})
-                                    </p>
+                                    <p className="text-[10px] font-mono font-bold text-zinc-400">({Math.round(area!.x * 100)}, {Math.round(area!.y * 100)})</p>
                                 </div>
                             </div>
                         </>
@@ -1243,27 +1038,21 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         };
 
         // ═══════════════════════════════════════
-        //  Zoom Indicator Overlay
+        //  Zoom Indicator
         // ═══════════════════════════════════════
         const renderZoomIndicator = () => {
             const effectiveZoom = hardwareZoom ? 1 : zoom;
             if (effectiveZoom <= 1.05 || isCalibrating) return null;
-
             return (
                 <div className="absolute top-6 right-6 z-[80] flex flex-col items-end gap-3 pointer-events-none">
-                    {/* Zoom Badge - Smaller & Compact */}
-                    <motion.div
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="flex items-center gap-2 px-2.5 py-1.5 bg-black/40 backdrop-blur-md border border-white/5 rounded-xl shadow-lg"
-                    >
+                    <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center gap-2 px-2.5 py-1.5 bg-black/40 backdrop-blur-md border border-white/5 rounded-xl shadow-lg">
                         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/80 animate-pulse" />
                         <span className="text-[9px] font-bold text-white/90 uppercase tracking-widest leading-none">{effectiveZoom.toFixed(2)}x</span>
                     </motion.div>
                 </div>
             );
         };
-
 
         // ═══════════════════════════════════════
         //  RENDER
@@ -1279,17 +1068,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                     style={{ ...containerStyle, background: 'transparent' }}
                     className={`relative w-full h-full ${isCalibrating ? 'ring-2 ring-indigo-500/50 transition-shadow duration-200' : ''}`}
                 >
-                    {/* Empty block to maintain size for GStreamer overlay rendering through the transparent background */}
-                    <div style={{
-                        position: "absolute",
-                        top: 0,
-                        left: 0,
-                        width: "100%",
-                        height: "100%",
-                        background: "transparent",
-                    }}>
-                        {/* Canvas MJPEG renderer — vsync-synced, no tearing */}
-                        {/* Frames drawn via requestAnimationFrame, synced to display refresh */}
+                    <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", background: "transparent" }}>
                         {mjpegMode && (
                             <canvas
                                 ref={canvasDisplayRef}
@@ -1307,12 +1086,9 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                                 }}
                             />
                         )}
-                        {/* Dev Mode local camera fallback (Only plays if stream attached) */}
                         <video
                             ref={videoRef}
-                            autoPlay
-                            playsInline
-                            muted
+                            autoPlay playsInline muted
                             className="pointer-events-none -z-10"
                             style={{ ...videoInnerStyle, display: status === 'streaming' ? 'block' : 'none' }}
                         />
@@ -1320,28 +1096,12 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
 
                     {frozenFrame && (
                         <div className="absolute inset-0 z-5 bg-black flex items-center justify-center">
-                            <img
-                                src={frozenFrame}
-                                style={{
-                                    maxWidth: "100%",
-                                    maxHeight: "100%",
-                                    objectFit: "contain",
-                                    transform: mirrored ? "scaleX(-1)" : "none",
-                                }}
-                                className="block"
-                                alt="Frozen"
-                            />
+                            <img src={frozenFrame} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", transform: mirrored ? "scaleX(-1)" : "none" }} className="block" alt="Frozen" />
                         </div>
                     )}
 
-                    {/* Canvas for overlays if needed */}
-                    <canvas
-                        ref={canvasRef}
-                        className="absolute inset-0 w-full h-full pointer-events-none z-10"
-                        style={{ ...videoInnerStyle, display: 'none' }} // Hidden by default
-                    />
+                    <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" style={{ ...videoInnerStyle, display: 'none' }} />
 
-                    {/* Grid Overlay */}
                     {showGrid && (
                         <div className="absolute inset-0 pointer-events-none z-10 opacity-30">
                             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px h-full bg-white/20" />
@@ -1352,31 +1112,15 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         </div>
                     )}
 
-                    {/* Circle Hook Overlay — resizable reference ring */}
                     {overlayCircle?.visible && (
                         <div className="absolute inset-0 pointer-events-none z-20 flex items-center justify-center">
-                            <svg
-                                width="100%" height="100%"
-                                viewBox="0 0 100 100"
-                                preserveAspectRatio="xMidYMid meet"
-                                className="absolute inset-0"
-                            >
-                                <circle
-                                    cx="50" cy="50"
-                                    r={overlayCircle.size / 2}
-                                    fill="none"
-                                    stroke="rgba(0, 230, 180, 0.6)"
-                                    strokeWidth="0.5"
-                                    strokeDasharray="4 2"
-                                />
+                            <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" className="absolute inset-0">
+                                <circle cx="50" cy="50" r={overlayCircle.size / 2} fill="none" stroke="rgba(0, 230, 180, 0.6)" strokeWidth="0.5" strokeDasharray="4 2" />
                                 <line x1="48" y1="50" x2="52" y2="50" stroke="rgba(0, 230, 180, 0.3)" strokeWidth="0.15" />
                                 <line x1="50" y1="48" x2="50" y2="52" stroke="rgba(0, 230, 180, 0.3)" strokeWidth="0.15" />
                             </svg>
                         </div>
                     )}
-
-                    {/* Circle scope mask — CSS clip-path handles this now via containerStyle */}
-                    {/* No SVG mask needed — eliminates GPU re-composition flicker */}
 
                     {renderCalibrationOverlay()}
                 </div>
