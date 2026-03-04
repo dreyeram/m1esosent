@@ -69,36 +69,33 @@ def capture_thread():
         # Request resolution/fps.  Do NOT set FOURCC=MJPG — that activates the
         # hardware MJPEG encoder which produces corrupted frames on this card.
         # Default (YUYV/uncompressed) → OpenCV decodes cleanly to BGR.
-        # Default to 720p if not specified — more stable for USB bandwidth
-        target_w = WIDTH if WIDTH > 0 else 1280
-        target_h = HEIGHT if HEIGHT > 0 else 720
-        
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  target_w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
-        cap.set(cv2.CAP_PROP_FPS,          30) # Force 30 for stability
+        # DO NOT force resolution or framerate here. The reference Pi app
+        # works perfectly with the camera's native default stream.
+        # Forcing cap.set(WIDTH/HEIGHT/FPS) on some USB capture cards
+        # causes the hardware scaler to activate, which introduces the
+        # interlacing bands or causes complete stalls (select timeout).
+        if WIDTH > 0 and HEIGHT > 0:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+        if FPS > 0:
+            cap.set(cv2.CAP_PROP_FPS, FPS)
 
         aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f'[Capture] {aw}×{ah} capture active')
+        af = cap.get(cv2.CAP_PROP_FPS)
+        print(f'[Capture] {aw}×{ah} @ {af} fps capture active (Native Mode)')
 
         t0       = time.time()
         n_frames = 0
 
         while True:
-            # Use grab() + retrieve() for more atomic buffer synchronization
-            ok = cap.grab()
-            if not ok: continue
-            
-            ok, bgr = cap.retrieve()
-            if not ok or bgr is None: continue
+            # Simple atomic read, matches reference app exactly
+            ok, bgr = cap.read()
+            if not ok or bgr is None or bgr.size == 0:
+                time.sleep(0.005)
+                continue
 
-            # ── SMOOTH ARTIFACTS ─────────────────────────────────────
-            # A 3x3 median blur is the "magic bullet" for hospital 1080i
-            # "comb" artifacts. It removes the jaggies without the
-            # 50% resolution loss of bob-deinterlacing.
-            # ─────────────────────────────────────────────────────────
             try:
-                bgr = cv2.medianBlur(bgr, 3)
                 ret, buf = cv2.imencode('.jpg', bgr, ENCODE_PARAMS)
             except cv2.error:
                 continue

@@ -28,9 +28,9 @@ module.exports = {
             cwd: '/home/lm/loyalmed',
             env: {
                 VIDEO_DEVICE_INDEX: '0',
-                WIDTH: '1280',
-                HEIGHT: '720',
-                FRAMERATE: '30',
+                WIDTH: '0',
+                HEIGHT: '0',
+                FRAMERATE: '0',
                 JPEG_QUALITY: '85',
                 HTTP_PORT: '5555',
             },
