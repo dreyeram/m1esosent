@@ -89,6 +89,21 @@ def capture_thread():
                 time.sleep(0.005)
                 continue
 
+            # ── DE-INTERLACE ──────────────────────────────────────────
+            # The endoscope camera outputs 1080i (interlaced).
+            # Even rows = field 1 (time T), Odd rows = field 2 (time T+1/60s).
+            # When the scope moves, the two fields show slightly different
+            # positions → horizontal bands (the "glassy lines").
+            #
+            # Fix: extract only even-numbered rows (one complete field),
+            # then scale back to the full frame height using bilinear
+            # interpolation ("bob" de-interlacing). This is the standard
+            # medical video de-interlacing method.
+            # ─────────────────────────────────────────────────────────
+            h, w = bgr.shape[:2]
+            even_field = bgr[0::2, :]                               # every other row
+            bgr = cv2.resize(even_field, (w, h), interpolation=cv2.INTER_LINEAR)
+
             try:
                 ret, buf = cv2.imencode('.jpg', bgr, ENCODE_PARAMS)
             except cv2.error:
