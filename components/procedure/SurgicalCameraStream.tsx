@@ -237,71 +237,102 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
         }, [deviceId, resolution]);
 
         // ═══════════════════════════════════════
-        //  MJPEG Canvas Renderer — Zero-tearing live feed
-        //  Off-screen Image consumes the MJPEG stream from the daemon.
-        //  A rAF loop draws the current frame to a visible <canvas>.
-        //  canvas.drawImage() goes through Chromium's GPU compositor
-        //  which IS vsync'd — unlike <img> multipart/x-mixed-replace.
+        //  MJPEG Atomic Frame Renderer — Zero Tearing
+        //
+        //  Root cause of tearing:
+        //    drawImage(img) can execute while the browser is still decoding
+        //    the JPEG — resulting in partial frames being painted.
+        //
+        //  Fix:
+        //    1. Fetch each frame as Blob from /capture (complete discrete frame)
+        //    2. createImageBitmap(blob) fully decodes JPEG before resolving
+        //    3. transferFromImageBitmap() atomically transfers at vsync
+        //    4. will-change:transform forces canvas onto own GPU layer
+        //
+        //  Matches the reference Pi app: cv2.read() waits for a complete
+        //  frame before returning — same guarantee, different stack.
         // ═══════════════════════════════════════
         useEffect(() => {
             if (!mjpegMode) return;
 
             const hostname = window.location.hostname || 'localhost';
-            const streamUrl = `http://${hostname}:5555/stream`;
+            const captureUrl = `http://${hostname}:5555/capture`;
             const cvs = mjpegCanvasRef.current;
             if (!cvs) return;
 
-            const ctx = cvs.getContext('2d', { alpha: false });
-            if (!ctx) return;
+            // Use ImageBitmapRenderingContext if available — atomically transfers
+            // fully decoded bitmaps to canvas at compositor vsync boundary.
+            // Falls back to 2D context for older browsers.
+            const bitmapCtx = cvs.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
+            const ctx2d = !bitmapCtx ? cvs.getContext('2d', { alpha: false }) : null;
 
-            // Off-screen image receives the MJPEG stream (hidden, never rendered)
-            const offscreenImg = new Image();
-            offscreenImg.crossOrigin = 'anonymous';
             let isActive = true;
             let hasReceivedFrame = false;
-            let cw = 1920, ch = 1080;
+            let rafId: number | null = null;
 
-            offscreenImg.onload = () => {
-                if (!hasReceivedFrame) {
-                    hasReceivedFrame = true;
-                    // Set canvas resolution to match the stream
-                    cvs!.width = offscreenImg.naturalWidth || 1920;
-                    cvs!.height = offscreenImg.naturalHeight || 1080;
-                    cw = cvs!.width;
-                    ch = cvs!.height;
-                    setMjpegHasFrame(true);
-                    setStatus('connected');
-                    console.log(`[Camera] MJPEG stream active: ${cw}x${ch}`);
+            // Sequential fetch loop:
+            //   fetch complete JPEG → decode → render at vsync → fetch next
+            // Sequential = no buffer pileup, every rendered frame is complete.
+            async function fetchAndRenderFrame() {
+                if (!isActive) return;
+
+                try {
+                    const res = await fetch(`${captureUrl}?t=${Date.now()}`, {
+                        method: 'GET',
+                        cache: 'no-store',
+                    });
+
+                    if (!res.ok || !isActive) {
+                        if (isActive) setTimeout(fetchAndRenderFrame, 300);
+                        return;
+                    }
+
+                    const blob = await res.blob();
+                    if (!isActive) return;
+
+                    // Fully decode JPEG — createImageBitmap only resolves when complete.
+                    // This is the key: we NEVER draw a partially decoded frame.
+                    const bitmap = await createImageBitmap(blob);
+                    if (!isActive) { bitmap.close(); return; }
+
+                    // First frame: set canvas resolution
+                    if (!hasReceivedFrame) {
+                        hasReceivedFrame = true;
+                        cvs!.width = bitmap.width;
+                        cvs!.height = bitmap.height;
+                        setMjpegHasFrame(true);
+                        setStatus('connected');
+                        console.log(`[Camera] Feed active: ${bitmap.width}x${bitmap.height}`);
+                    }
+
+                    // Paint at next vsync via rAF
+                    rafId = requestAnimationFrame(() => {
+                        if (!isActive) { bitmap.close(); return; }
+                        if (bitmapCtx) {
+                            // Atomic compositor transfer — GPU paints this at vsync
+                            bitmapCtx.transferFromImageBitmap(bitmap);
+                        } else if (ctx2d) {
+                            ctx2d.drawImage(bitmap, 0, 0, cvs!.width, cvs!.height);
+                            bitmap.close();
+                        }
+                        // Fetch next frame immediately after render
+                        if (isActive) fetchAndRenderFrame();
+                    });
+
+                } catch (err) {
+                    if (isActive) {
+                        console.warn('[Camera] Frame fetch error, retrying:', err);
+                        setTimeout(fetchAndRenderFrame, 300);
+                    }
                 }
-            };
-
-            offscreenImg.onerror = () => {
-                console.warn('[Camera] MJPEG stream error — reconnecting in 2s');
-                setTimeout(() => {
-                    if (isActive) offscreenImg.src = `${streamUrl}?t=${Date.now()}`;
-                }, 2000);
-            };
-
-            // Start the stream
-            offscreenImg.src = streamUrl;
-            console.log(`[Camera] MJPEG stream connecting: ${streamUrl}`);
-
-            // rAF draw loop — draws the off-screen image's current frame
-            // to the visible canvas at the display's refresh rate.
-            // canvas.drawImage() is composited by Chromium's GPU at vsync.
-            function renderLoop() {
-                if (!isActive || !ctx) return;
-                if (offscreenImg.complete && offscreenImg.naturalWidth > 0) {
-                    ctx.drawImage(offscreenImg, 0, 0, cw, ch);
-                }
-                mjpegRafRef.current = requestAnimationFrame(renderLoop);
             }
-            mjpegRafRef.current = requestAnimationFrame(renderLoop);
+
+            console.log(`[Camera] Starting atomic frame loop: ${captureUrl}`);
+            fetchAndRenderFrame();
 
             return () => {
                 isActive = false;
-                if (mjpegRafRef.current) cancelAnimationFrame(mjpegRafRef.current);
-                offscreenImg.src = ''; // Close the stream connection
+                if (rafId !== null) cancelAnimationFrame(rafId);
             };
         }, [mjpegMode]);
 
@@ -1211,7 +1242,7 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                         height: "100%",
                         background: "transparent",
                     }}>
-                        {/* MJPEG Mode — Canvas-based feed (GPU-composited, vsync'd) */}
+                        {/* MJPEG Mode — Atomic bitmap canvas (GPU-composited, vsync'd) */}
                         {mjpegMode && (
                             <canvas
                                 ref={mjpegCanvasRef}
@@ -1224,7 +1255,8 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                                     height: '100%',
                                     display: 'block',
                                     visibility: mjpegHasFrame ? 'visible' : 'hidden',
-                                    transform: mirrored ? 'scaleX(-1)' : 'none',
+                                    transform: mirrored ? 'scaleX(-1)' : 'translateZ(0)',
+                                    willChange: 'transform',
                                 }}
                             />
                         )}
