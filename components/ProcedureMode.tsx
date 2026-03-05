@@ -1459,25 +1459,27 @@ export default function ProcedureMode({ procedureId, patient, onBack, onGenerate
                             </div>
                         </div>
                     ) : (
-                        <SurgicalCameraStream
-                            ref={cameraRef}
-                            wsUrl={wsUrl || undefined}
-                            deviceId={!wsUrl ? selectedDeviceId : undefined}
-                            resolution={doctorSettings.cameraResolution}
-                            hardwareZoom={hasHardwareZoom}
-                            // Pass Active Scope Profile Settings (staged calibration values take precedence)
+                        <div className="w-full h-full absolute inset-0">
+                            <SurgicalCameraStream
+                                ref={cameraRef}
+                                wsUrl={wsUrl || undefined}
+                                deviceId={!wsUrl ? selectedDeviceId : undefined}
+                                resolution={doctorSettings.cameraResolution}
+                                hardwareZoom={hasHardwareZoom}
+                                // Pass Active Scope Profile Settings (staged calibration values take precedence)
 
-                            captureArea={calibrationArea || activeProfile?.captureArea}
-                            scopeScale={scopeScale}
-                            zoom={scopeScale}
-                            showGrid={isGrid}
-                            frozenFrame={frozenFrame}
-                            showLivePip={!!frozenFrame}
-                            isCalibrating={isCalibrating}
-                            activeShape={isCalibrating ? calibrationShape : (activeProfile?.shape || 'rectangle')}
-                            onResolutionChange={handleResolutionChange}
-                            onCalibrationChange={handleCalibrationAreaChange}
-                            aspectRatioCorrection={settings.aspectRatio} />
+                                captureArea={calibrationArea || activeProfile?.captureArea}
+                                scopeScale={scopeScale}
+                                zoom={scopeScale}
+                                showGrid={isGrid}
+                                frozenFrame={frozenFrame}
+                                showLivePip={!!frozenFrame}
+                                isCalibrating={isCalibrating}
+                                activeShape={isCalibrating ? calibrationShape : (activeProfile?.shape || 'rectangle')}
+                                onResolutionChange={handleResolutionChange}
+                                onCalibrationChange={handleCalibrationAreaChange}
+                                aspectRatioCorrection={settings.aspectRatio} />
+                        </div>
                     )}
 
                     <AnimatePresence>
