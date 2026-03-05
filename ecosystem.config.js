@@ -1,69 +1,110 @@
+// =============================================================================
+//  ecosystem.config.js  ·  PM2 process configuration  ·  SURGICAL GRADE v4
+//
+//  BEFORE STARTING — install dependencies once:
+//    cd ~/loyalmed && npm install node-webcam ws
+//    # fswebcam is pre-installed on Raspberry Pi OS — if not:
+//    #   sudo apt install fswebcam
+//
+//  START / RESTART:
+//    pm2 delete all
+//    pm2 start ecosystem.config.js
+//    pm2 save
+//    pm2 logs --lines 40
+//
+//  VERIFY CAPTURE MODE:
+//    curl -s http://localhost:5555/status | python3 -m json.tool
+//    # Look for: "mode": "node-webcam"  ← primary mode
+//    # If you see: "mode": "ffmpeg"     ← npm install node-webcam first
+// =============================================================================
+
 module.exports = {
     apps: [
-        // ═══════════════════════════════════════════════════════════
-        //  Next.js — Endoscopy Suite Frontend + API
-        // ═══════════════════════════════════════════════════════════
+
+        // ── 1. Next.js application server ──────────────────────────────────
         {
             name: 'endoscopy-suite',
             script: 'node_modules/.bin/next',
-            args: 'start -H 0.0.0.0 -p 3000',
+            args: 'start',
+            interpreter: 'none',
+
             cwd: '/home/lm/loyalmed',
-            env: {
-                NODE_ENV: 'production',
-                DATABASE_URL: 'file:/home/lm/loyalmed/prisma/dev.db',
-                JWT_SECRET: 'endoscopy-suite-jwt-secret-change-in-production-to-random-string',
-                JWT_REFRESH_SECRET: 'endoscopy-suite-refresh-secret-change-in-production-to-random-string',
-                INTERNAL_STORAGE_PATH: './data',
-                PORT: 3000,
-            },
             instances: 1,
             exec_mode: 'fork',
-            autorestart: true,
-            watch: false,
-            max_memory_restart: '512M',
+
+            // Give Next.js time to compile and listen before PM2 marks it running
+            wait_ready: false,
+            listen_timeout: 60000,
+
+            restart_delay: 3000,
+            max_restarts: 10,
+            kill_timeout: 8000,
+
+            env: {
+                NODE_ENV: 'production',
+                PORT: '3000',
+                HOSTNAME: '0.0.0.0',
+
+                // ── Prisma / Database ──
+                DATABASE_URL: 'file:./prisma/prod.db',
+
+                // ── SECURITY: Move these to a .env file — do NOT commit real values ──
+                // Generate with: node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+                JWT_SECRET: 'REPLACE_WITH_64_BYTE_HEX_SECRET',
+                JWT_REFRESH_SECRET: 'REPLACE_WITH_DIFFERENT_64_BYTE_HEX_SECRET',
+
+                // ── Daemon connection (used by Next.js API routes) ──
+                CAPTURE_DAEMON_URL: 'http://localhost:5555',
+            },
+
             log_date_format: 'YYYY-MM-DD HH:mm:ss',
-            error_file: '/home/lm/loyalmed/logs/error.log',
-            out_file: '/home/lm/loyalmed/logs/output.log',
-            merge_logs: true,
+            error_file: '/home/lm/loyalmed/logs/nextjs-error.log',
+            out_file: '/home/lm/loyalmed/logs/nextjs-out.log',
         },
 
-        // ═══════════════════════════════════════════════════════════
-        //  Pi Capture Daemon — MJPEG camera stream server (Node.js)
-        //
-        //  FIX v2:
-        //    - interpreter changed: python3 → node
-        //    - script path updated: .py → .js
-        //    - env vars updated to match new Node.js daemon:
-        //        VIDEO_DEVICE   : full device path (was VIDEO_DEVICE_INDEX)
-        //        RESOLUTION     : WxH string       (was separate WIDTH/HEIGHT)
-        //        FRAMERATE      : fps               (unchanged)
-        //        PORT           : HTTP port         (was HTTP_PORT)
-        //    - max_memory_restart raised: 512M → 256M (daemon is very lean now)
-        //    - kill_timeout added: gives ffmpeg time to flush before SIGKILL
-        //    - restart_delay added: prevents rapid crash loops hammering /dev/video0
-        // ═══════════════════════════════════════════════════════════
+        // ── 2. Pi Capture Daemon ────────────────────────────────────────────
         {
             name: 'pi-capture-daemon',
-            interpreter: 'node',                                   // ← was python3
-            script: './scripts/pi_capture_daemon.js',         // ← was .py
+            script: './scripts/pi_capture_daemon.js',
+            interpreter: 'node',
+
             cwd: '/home/lm/loyalmed',
-            env: {
-                VIDEO_DEVICE: '/dev/video0',  // Full device path (not index)
-                RESOLUTION: '1920x1080',    // WxH — change to 2560x1440 if needed
-                FRAMERATE: '30',           // fps — 30 is stable; try 60 if needed
-                PORT: '5555',         // HTTP port the daemon listens on
-            },
             instances: 1,
-            exec_mode: 'fork',       // Must be fork — daemon manages its own child
-            autorestart: true,
-            watch: false,        // Never watch — ffmpeg stdout would trigger restarts
-            max_memory_restart: '256M',       // Daemon is lean — 256M is plenty
-            restart_delay: 3000,         // Wait 3s between restarts (prevents /dev/video0 hammering)
-            kill_timeout: 5000,         // Give ffmpeg 5s to flush before SIGKILL
+            exec_mode: 'fork',
+
+            restart_delay: 3000,
+            max_restarts: 20,
+            kill_timeout: 5000,
+
+            env: {
+                NODE_ENV: 'production',
+
+                // ── Camera device ──────────────────────────────────────────
+                VIDEO_DEVICE: '/dev/video0',
+
+                // ── Resolution: must match a format the camera advertises ──
+                // Run: v4l2-ctl -d /dev/video0 --list-formats-ext
+                // UltraSemi USB3 Video supports: 1920x1080, 2560x1440, 640x480
+                RESOLUTION: '1920x1080',
+
+                // ── Framerate: node-webcam captures one JPEG per call in a loop ──
+                // 30fps = ~33ms interval. Increasing beyond 30 won't help with
+                // fswebcam as each capture is a discrete syscall, not a streaming pipe.
+                FRAMERATE: '30',
+
+                // ── JPEG quality: 85 is balanced for surgical clarity vs frame size ──
+                JPEG_QUALITY: '85',
+
+                // ── HTTP / WebSocket server port ───────────────────────────
+                // WebSocket primary endpoint: ws://localhost:5555/stream
+                // HTTP legacy endpoint:       http://localhost:5555/stream
+                PORT: '5555',
+            },
+
             log_date_format: 'YYYY-MM-DD HH:mm:ss',
-            error_file: '/home/lm/loyalmed/logs/daemon_error.log',
-            out_file: '/home/lm/loyalmed/logs/daemon_output.log',
-            merge_logs: true,
+            error_file: '/home/lm/loyalmed/logs/daemon-error.log',
+            out_file: '/home/lm/loyalmed/logs/daemon-out.log',
         },
+
     ],
 };
