@@ -266,11 +266,13 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             const ro = new ResizeObserver((entries) => {
                 for (const e of entries) {
                     const { width, height } = e.contentRect;
+                    console.log(`[Stream] ResizeObserver: ${width}x${height}`);
                     setWrapperSize({ w: Math.round(width), h: Math.round(height) });
                 }
             });
             ro.observe(el);
             const r = el.getBoundingClientRect();
+            console.log(`[Stream] Initial size: ${r.width}x${r.height}`);
             setWrapperSize({ w: Math.round(r.width), h: Math.round(r.height) });
             return () => ro.disconnect();
         }, []);
@@ -411,12 +413,16 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 if (hasImageDecoder) {
                     const dec = new (window as any).ImageDecoder({
                         type: 'image/jpeg',
-                        data: data instanceof ArrayBuffer ? data : new Uint8Array((data as any).buffer).buffer,
+                        data: data,
                     });
-                    dec.decode().then(({ image }: { image: ImageBitmap }) => onDecoded(image)).catch(() => { });
+                    dec.decode().then(({ image }: { image: ImageBitmap }) => onDecoded(image)).catch((err: any) => {
+                        console.error('[Stream] ImageDecoder failed, trying fallback:', err);
+                        const blob = new Blob([data], { type: 'image/jpeg' });
+                        createImageBitmap(blob).then(onDecoded).catch(e => console.error('[Stream] Fallback decoder also failed:', e));
+                    });
                 } else {
-                    const blob = new Blob([data instanceof ArrayBuffer ? data : new Uint8Array((data as any).buffer)], { type: 'image/jpeg' });
-                    createImageBitmap(blob).then(onDecoded).catch(() => { });
+                    const blob = new Blob([data], { type: 'image/jpeg' });
+                    createImageBitmap(blob).then(onDecoded).catch(err => console.error('[Stream] createImageBitmap failed:', err));
                 }
             };
 
@@ -480,11 +486,13 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
             const connectWS = () => {
                 if (!active) return;
                 wsAttempts++;
-                console.log(`[Stream] WS → ws://${host}:5555/stream (attempt ${wsAttempts})`);
+                const url = _wsUrl || `ws://${host}:5555/stream`;
+                console.log(`[Stream] WS → ${url} (attempt ${wsAttempts})`);
 
                 try {
-                    ws = new WebSocket(`ws://${host}:5555/stream`);
-                } catch {
+                    ws = new WebSocket(url);
+                } catch (e) {
+                    console.error('[Stream] WS constructor failed:', e);
                     if (active) connectHTTP();
                     return;
                 }
@@ -493,10 +501,18 @@ const SurgicalCameraStream = forwardRef<CameraStreamHandle, SurgicalCameraStream
                 ws.onopen = () => { console.log('[Stream] WS connected ✓'); retryDelay = 1000; };
 
                 ws.onmessage = (evt) => {
-                    if (!active || !(evt.data instanceof ArrayBuffer)) return;
-                    if ((evt.data as ArrayBuffer).byteLength < MIN_CLIENT_FRAME_BYTES) return;
+                    if (!active) return;
+                    if (!(evt.data instanceof ArrayBuffer)) {
+                        console.warn('[Stream] Received non-binary WS message:', typeof evt.data);
+                        return;
+                    }
+                    if (evt.data.byteLength < MIN_CLIENT_FRAME_BYTES) {
+                        console.warn(`[Stream] WS frame too small: ${evt.data.byteLength} bytes`);
+                        return;
+                    }
+                    if (!wsWorked) console.log(`[Stream] Got first frame via WS: ${evt.data.byteLength} bytes`);
                     wsWorked = true;
-                    decodeJpeg(evt.data as ArrayBuffer);
+                    decodeJpeg(evt.data);
                 };
 
                 ws.onclose = (e) => {
