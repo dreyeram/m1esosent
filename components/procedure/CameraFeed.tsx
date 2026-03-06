@@ -1,154 +1,124 @@
 "use client";
 
 // =============================================================================
-//  CameraFeed — Direct camera display (no iframe, no postMessage)
+//  CameraFeed — Raw browser camera via getUserMedia (WebRTC)
 //
-//  Pi daemon mode:  <img src="http://{host}:5555/stream" /> (native MJPEG)
-//  Localhost mode:  <video> with getUserMedia (WebRTC fallback)
+//  No daemon. No ffmpeg. No MJPEG parsing. No WebSocket.
+//  Just the browser talking directly to the USB camera — exactly like
+//  webcamtests.com does.
 //
 //  Exposes captureFrame() via React.forwardRef + useImperativeHandle
 // =============================================================================
 
-import React, { useRef, useState, useEffect, useImperativeHandle, forwardRef, useCallback } from "react";
+import React, {
+    useRef,
+    useState,
+    useEffect,
+    useImperativeHandle,
+    forwardRef,
+    useCallback,
+} from "react";
 
 export interface CameraFeedHandle {
     captureFrame(): string | null;
-    getVideoElement(): HTMLVideoElement | HTMLImageElement | null;
+    getVideoElement(): HTMLVideoElement | null;
 }
-
-type FeedMode = "daemon" | "webrtc" | "detecting";
 
 const CameraFeed = forwardRef<CameraFeedHandle, { className?: string }>(
     function CameraFeed({ className = "" }, ref) {
-        const imgRef = useRef<HTMLImageElement>(null);
         const videoRef = useRef<HTMLVideoElement>(null);
         const canvasRef = useRef<HTMLCanvasElement>(null);
         const streamRef = useRef<MediaStream | null>(null);
-        const [mode, setMode] = useState<FeedMode>("detecting");
+        const [ready, setReady] = useState(false);
         const [error, setError] = useState<string | null>(null);
 
-        // ── Detect daemon or fall back to WebRTC ──
+        // ── Connect to camera ──
         useEffect(() => {
             let active = true;
-            const host = typeof window !== "undefined" ? (window.location.hostname || "localhost") : "localhost";
-            const daemonUrl = `http://${host}:5555`;
 
-            (async () => {
-                // 1. Try daemon first
+            async function startCamera() {
                 try {
-                    const controller = new AbortController();
-                    const timeout = setTimeout(() => controller.abort(), 2000);
-                    const res = await fetch(`${daemonUrl}/status`, { signal: controller.signal });
-                    clearTimeout(timeout);
-                    if (res.ok && active) {
-                        // Daemon is running — use MJPEG stream
-                        setMode("daemon");
-                        if (imgRef.current) {
-                            imgRef.current.src = `${daemonUrl}/stream`;
-                        }
+                    // Request camera — browser will show the "USB3 Video (v4l2)" device
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 30 },
+                        },
+                        audio: false,
+                    });
+
+                    if (!active) {
+                        stream.getTracks().forEach((t) => t.stop());
                         return;
                     }
-                } catch {
-                    // Daemon not available
-                }
 
-                if (!active) return;
-
-                // 2. Fall back to WebRTC (getUserMedia)
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        video: { width: { ideal: 1920 }, height: { ideal: 1080 } }
-                    });
-                    if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
                     streamRef.current = stream;
+
                     if (videoRef.current) {
                         videoRef.current.srcObject = stream;
                     }
-                    setMode("webrtc");
-                } catch (e) {
-                    if (active) {
-                        console.error("[CameraFeed] No camera source available:", e);
-                        setError("Camera unavailable. Check that the daemon is running or a camera is connected.");
+
+                    setReady(true);
+                    setError(null);
+                } catch (err: any) {
+                    if (!active) return;
+                    console.error("[CameraFeed] getUserMedia failed:", err);
+
+                    if (err.name === "NotReadableError") {
+                        setError("Camera is in use by another application.");
+                    } else if (err.name === "NotAllowedError") {
+                        setError("Camera permission denied.");
+                    } else if (err.name === "NotFoundError") {
+                        setError("No camera detected.");
+                    } else {
+                        setError(`Camera error: ${err.message}`);
                     }
                 }
-            })();
+            }
+
+            startCamera();
 
             return () => {
                 active = false;
-                streamRef.current?.getTracks().forEach(t => t.stop());
-                streamRef.current = null;
+                if (streamRef.current) {
+                    streamRef.current.getTracks().forEach((t) => t.stop());
+                    streamRef.current = null;
+                }
             };
         }, []);
 
-        // ── Expose captureFrame to parent ──
+        // ── Capture a single frame from the live video ──
         const captureFrame = useCallback((): string | null => {
+            const video = videoRef.current;
             const canvas = canvasRef.current;
-            if (!canvas) { console.warn("[CameraFeed] No canvas ref"); return null; }
+            if (!video || !canvas || video.videoWidth === 0) return null;
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
             const ctx = canvas.getContext("2d");
-            if (!ctx) { console.warn("[CameraFeed] No 2d context"); return null; }
+            if (!ctx) return null;
 
-            try {
-                if (mode === "daemon" && imgRef.current && imgRef.current.naturalWidth > 0) {
-                    canvas.width = imgRef.current.naturalWidth;
-                    canvas.height = imgRef.current.naturalHeight;
-                    ctx.drawImage(imgRef.current, 0, 0);
-                    const data = canvas.toDataURL("image/png", 1.0);
-                    console.log("[CameraFeed] Capture successful via canvas (daemon)");
-                    return data;
-                }
-                if (mode === "webrtc" && videoRef.current && videoRef.current.videoWidth > 0) {
-                    canvas.width = videoRef.current.videoWidth;
-                    canvas.height = videoRef.current.videoHeight;
-                    ctx.drawImage(videoRef.current, 0, 0);
-                    const data = canvas.toDataURL("image/png", 1.0);
-                    console.log("[CameraFeed] Capture successful via canvas (webrtc)");
-                    return data;
-                }
-            } catch (e) {
-                // CORS tainted canvas — drawImage works but toDataURL throws
-                console.warn("[CameraFeed] Canvas tainted or read error, capture via canvas failed:", e);
-
-                // FALLBACK: If daemon mode, we might try to reach out to a direct /capture endpoint
-                // but that requires async. captureFrame is sync in some callers.
-                // For now, let's log the detail.
-            }
-
-            console.warn("[CameraFeed] No active feed to capture from or capture failed. Mode:", mode);
-            return null;
-        }, [mode]);
-
-        useImperativeHandle(ref, () => ({
-            captureFrame,
-            getVideoElement: () => mode === "daemon" ? imgRef.current : videoRef.current
-        }), [captureFrame, mode]);
-
-        // ── Reconnect handler ──
-        const handleReconnect = useCallback(() => {
-            const host = window.location.hostname || "localhost";
-            if (imgRef.current) {
-                imgRef.current.src = "";
-                setTimeout(() => {
-                    if (imgRef.current) imgRef.current.src = `http://${host}:5555/stream`;
-                }, 100);
-            }
+            ctx.drawImage(video, 0, 0);
+            return canvas.toDataURL("image/jpeg", 0.92);
         }, []);
 
-        return (
-            <div className={`relative w-full h-full bg-black flex items-center justify-center overflow-hidden ${className}`}>
-                {/* MJPEG daemon stream — NO crossOrigin to avoid canvas taint */}
-                <img
-                    ref={imgRef}
-                    alt=""
-                    style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "contain",
-                        display: mode === "daemon" ? "block" : "none",
-                        background: "#000",
-                    }}
-                />
+        // ── Expose to parent via ref ──
+        useImperativeHandle(
+            ref,
+            () => ({
+                captureFrame,
+                getVideoElement: () => videoRef.current,
+            }),
+            [captureFrame]
+        );
 
-                {/* WebRTC video */}
+        return (
+            <div
+                className={`relative w-full h-full bg-black flex items-center justify-center overflow-hidden ${className}`}
+            >
+                {/* Live video — direct from browser camera API */}
                 <video
                     ref={videoRef}
                     autoPlay
@@ -158,7 +128,6 @@ const CameraFeed = forwardRef<CameraFeedHandle, { className?: string }>(
                         width: "100%",
                         height: "100%",
                         objectFit: "contain",
-                        display: mode === "webrtc" ? "block" : "none",
                         background: "#000",
                     }}
                 />
@@ -167,26 +136,17 @@ const CameraFeed = forwardRef<CameraFeedHandle, { className?: string }>(
                 {error && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
                         <span style={{ fontSize: 36, opacity: 0.2 }}>⚠</span>
-                        <span className="text-white/30 text-xs font-semibold">{error}</span>
+                        <span className="text-white/30 text-xs font-semibold">
+                            {error}
+                        </span>
                     </div>
                 )}
 
-                {/* Detecting state */}
-                {mode === "detecting" && !error && (
+                {/* Loading spinner */}
+                {!ready && !error && (
                     <div className="absolute inset-0 flex items-center justify-center">
                         <div className="w-6 h-6 border-2 border-white/20 border-t-emerald-500 rounded-full animate-spin" />
                     </div>
-                )}
-
-                {/* Reconnect button (daemon mode, if image fails to load) */}
-                {mode === "daemon" && (
-                    <button
-                        onClick={handleReconnect}
-                        className="absolute bottom-3 left-3 z-10 px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur-sm border border-white/10 text-[9px] font-bold text-white/40 uppercase tracking-widest hover:text-white/80 hover:bg-black/80 transition-all"
-                        title="Reconnect Camera Feed"
-                    >
-                        ↻ Reconnect
-                    </button>
                 )}
 
                 {/* Hidden canvas for frame capture */}
